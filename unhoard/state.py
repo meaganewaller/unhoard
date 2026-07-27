@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS items (
     summary TEXT,
     summary_model TEXT,
     summary_date TEXT,
-    content_hash TEXT
+    content_hash TEXT,
+    context_hash TEXT
 );
 """
 
@@ -48,7 +49,15 @@ class StateStore:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self):
+        """CREATE TABLE IF NOT EXISTS won't add columns to a table that already
+        exists from an earlier version -- patch those in here."""
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
+        if "context_hash" not in cols:
+            self.conn.execute("ALTER TABLE items ADD COLUMN context_hash TEXT")
 
     @contextmanager
     def _cursor(self):
@@ -131,11 +140,12 @@ class StateStore:
                     (today, key),
                 )
 
-    def save_summary(self, key: str, summary: str, model: str, content_hash: str):
+    def save_summary(self, key: str, summary: str, model: str, content_hash: str, context_hash: str):
         with self._cursor() as cur:
             cur.execute(
-                "UPDATE items SET summary=?, summary_model=?, summary_date=?, content_hash=? WHERE key=?",
-                (summary, model, datetime.now(timezone.utc).isoformat(), content_hash, key),
+                """UPDATE items SET summary=?, summary_model=?, summary_date=?,
+                   content_hash=?, context_hash=? WHERE key=?""",
+                (summary, model, datetime.now(timezone.utc).isoformat(), content_hash, context_hash, key),
             )
 
     def stats(self) -> dict:

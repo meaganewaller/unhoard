@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 
 from .config import Config
 from .state import StateStore
+from .summarize import context_hash as compute_context_hash
 from .summarize import summarize as ai_summarize
 
 
@@ -101,11 +102,17 @@ def _render_metadata_item(row, age: int) -> str:
 
 def _render_stale_item(cfg: Config, store: StateStore, row, age: int) -> str:
     summary_text = row["summary"] or ""
-    need_summary = not summary_text
+    current_ctx_hash = compute_context_hash(cfg.context)
+    # A cached summary was generated under a different `context` setting -- re-run it
+    # so newly-added preservation rules actually apply to items already summarized.
+    context_changed = bool(summary_text) and (row["context_hash"] or "") != current_ctx_hash
+    need_summary = not summary_text or context_changed
     if need_summary and cfg.anthropic_enabled:
-        text, chash = ai_summarize(row["title"], row["url"], cfg.anthropic_api_key, cfg.model, cfg.max_tokens_summary)
+        text, chash = ai_summarize(
+            row["title"], row["url"], cfg.anthropic_api_key, cfg.model, cfg.context, cfg.max_tokens_summary
+        )
         if text:
-            store.save_summary(row["key"], text, cfg.model, chash)
+            store.save_summary(row["key"], text, cfg.model, chash, current_ctx_hash)
             summary_text = text
 
     tags = _tags_str(row)

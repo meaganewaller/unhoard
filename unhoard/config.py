@@ -29,6 +29,8 @@ class Config:
     max_stale: int = 8
     model: str = "claude-sonnet-5"
     max_tokens_summary: int = 300
+    context: str = ""                 # free-text notes on your projects/interests, given to the
+                                       # summarizer so Action recommendations account for them
 
     @property
     def anthropic_enabled(self) -> bool:
@@ -63,6 +65,7 @@ def load_config() -> Config:
     cfg.max_aging = pick("max_aging", "UNHOARD_MAX_AGING", int)
     cfg.max_stale = pick("max_stale", "UNHOARD_MAX_STALE", int)
     cfg.model = pick("model", "UNHOARD_MODEL")
+    cfg.context = pick("context", "UNHOARD_CONTEXT")
 
     state_db = file_cfg.get("state_db_path")
     if state_db:
@@ -91,7 +94,13 @@ def write_default_config(force: bool = False) -> Path:
         '# max_aging = 6\n'
         '# max_stale = 8\n'
         '# model = "claude-sonnet-5"\n'
-        '# output_dir = "~/unhoard-digests"\n'
+        '# output_dir = "~/unhoard-digests"\n\n'
+        '# context = """\n'
+        '#   I collect and restore old-web / early-internet style sites: archived\n'
+        '#   tutorials, GeoCities-era design patterns, old CSS tricks. These often read\n'
+        '#   as "outdated" but are reference material I actively reuse -- don\'t\n'
+        '#   recommend Delete for nostalgic/archival web content like this.\n'
+        '# """\n'
     )
     return CONFIG_PATH
 

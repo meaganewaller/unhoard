@@ -92,6 +92,21 @@ Since the digest is just a Markdown file at `~/unhoard-digets/latest.md`, wiring
 
 Items older than `stale_days` (default 30) get their article text fetched and summarized by Claude, with a suggested action (Read/Skim/Archive/Delete). Summaries are cached by content hash, so rerunning `digest` doesn't re-summarize or re-spend tokens on items you've already seen. Items in the `new` and `aging` buckets are metadata-only (title/tags/excerpt).
 
+### Giving It Context
+
+The summarizer only sees the article text by default, so it'll happily recommend Delete on something that's "outdated" in isolation but that you actually want -- e.g. an archived tutorial you're deliberately collecting for an old-web-style project. Set `context` (in `config.toml` or `UNHOARD_CONTEXT`) to a few sentences about what you're doing with your backlog, and it's included in the summarization prompt so the Action recommendation accounts for it:
+
+```toml
+context = """
+I collect and restore old-web / early-internet style sites: archived tutorials,
+GeoCities-era design patterns, old CSS tricks. These often read as "outdated"
+but are reference material I actively reuse -- don't recommend Delete for
+nostalgic/archival web content like this.
+"""
+```
+
+Changing `context` invalidates cached summaries for stale items (compared cheaply, no re-fetch needed unless it actually changed), so the next `digest` re-evaluates them under the new rule instead of showing the old cached recommendation forever.
+
 ## Config Reference
 
 All of these can be set as environment variables (`UNHOARD_*`) or in `config.toml`
@@ -103,3 +118,4 @@ All of these can be set as environment variables (`UNHOARD_*`) or in `config.tom
 | `max_new` / `max_aging` / `max_stale` | 6 / 6 / 8 | Cap per bucket per digest |
 | `model` | `claude-sonnet-5` | Model used for stale-item summaries |
 | `output_dir` | `~/unhoard-digests/` | Where digest files land |
+| `context` | _(empty)_ | Free-text notes on your projects/interests, given to the summarizer |

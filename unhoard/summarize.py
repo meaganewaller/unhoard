@@ -21,12 +21,27 @@ exactly two short lines, nothing else:
 
 Summary: <one or two plain sentences on what this actually is/argues/covers>
 Action: <one of Read / Skim / Archive / Delete, then a 4-8 word reason>
-
+{context_block}
 Article title: {title}
 
 Article text (may be truncated):
 {content}
 """
+
+
+def _context_block(context: str) -> str:
+    if not context:
+        return ""
+    return (
+        "\nContext about the person triaging this -- weigh it before recommending "
+        f"Delete or Archive:\n{context.strip()}\n"
+    )
+
+
+def context_hash(context: str) -> str:
+    """Cheap local hash of the user's context setting, so a cached summary can be
+    invalidated when the context changes without re-fetching the article."""
+    return hashlib.sha256(context.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
 def fetch_article_text(url: str, max_chars: int = 6000) -> str:
@@ -47,7 +62,9 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
-def summarize(title: str, url: str, api_key: str, model: str, max_tokens: int = 300) -> tuple[str, str]:
+def summarize(
+    title: str, url: str, api_key: str, model: str, context: str = "", max_tokens: int = 300
+) -> tuple[str, str]:
     """Returns (summary_text, content_hash). summary_text is '' if it couldn't be produced --
     caller should fall back to the raw excerpt in that case."""
     article_text = fetch_article_text(url)
@@ -58,7 +75,7 @@ def summarize(title: str, url: str, api_key: str, model: str, max_tokens: int = 
     if not api_key:
         return "", chash
 
-    prompt = PROMPT_TEMPLATE.format(title=title, content=article_text)
+    prompt = PROMPT_TEMPLATE.format(title=title, content=article_text, context_block=_context_block(context))
     try:
         resp = requests.post(
             ANTHROPIC_API_URL,
