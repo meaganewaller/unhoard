@@ -1,0 +1,21 @@
+[project]
+name = "unhoard"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.34.2",
+    "trafilatura>=2.1.0",
+]
+
+[project.scripts]
+unhoard = "unhoard.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["unhoard*"]
+
