@@ -75,6 +75,7 @@ unhoard stats                    # quick counts
 unhoard mark <key> --done        # e.g., unhoard mark raindrop:123456 --done
 unhoard mark <key> --unhoarded --note "..."  # see "What 'Unhoarded' Means" below
 unhoard mark <key> --snoze 14    # hide for 2 weeks
+unhoard apply <key> --all        # push suggested tags/collection + AI summary to the source
 ```
 
 `digest` always writes both `digest-YYYY-MM-DD.md` and `latest.md` (same content) so cronjobs / scripts can always read a stable filename.
@@ -121,6 +122,29 @@ nostalgic/archival web content like this.
 ```
 
 Changing `context` invalidates cached summaries for stale items (compared cheaply, no re-fetch needed unless it actually changed), so the next `digest` re-evaluates them under the new rule instead of showing the old cached recommendation forever.
+
+### Suggested Tags & Collection
+
+Alongside Summary/Action, stale items also get a suggested set of tags and a suggested destination collection, shown in the digest like:
+
+```
+<sub>suggested -- tags: geocities, blinkie | collection: Old Web Archive (apply with `unhoard apply <key>`)</sub>
+```
+
+The collection suggestion is grounded in your real Raindrop collections (fetched once per digest run, only when something actually needs summarizing) -- the model picks from your existing collections or says "none," it doesn't invent new ones. Sources without collections (Chrome, Safari, generic JSON) just don't get a collection suggestion.
+
+Nothing here writes anything on its own -- suggestions just sit in the digest until you run:
+
+```bash
+unhoard apply <key> --tags          # merge the suggested tags into the item (Raindrop only, doesn't replace existing tags)
+unhoard apply <key> --collection    # move the item to the suggested collection
+unhoard apply <key> --summary       # write the AI summary into the source's note field
+unhoard apply <key> --all           # all three at once
+```
+
+Once applied, that suggestion drops out of future digests -- it's tracked locally so you don't keep getting nagged about something you already pushed. If the suggested collection no longer exists by the time you apply (renamed/deleted), that part is skipped with a message rather than erroring.
+
+Note: `mark --unhoarded --note "..."` and `apply --summary` both write to the same Raindrop note field -- there's only one per item, so whichever you run last wins.
 
 ## Config Reference
 

@@ -1,7 +1,7 @@
 """Raindrop.io adapter -- pulls a collection via the REST API."""
 from __future__ import annotations
 
-from typing import Iterator, Optional
+from typing import Iterable, Iterator, Optional
 
 import requests
 
@@ -73,22 +73,54 @@ class RaindropAdapter:
             page += 1
 
     def mark_unhoarded(self, source_id: str, note: Optional[str] = None) -> None:
-        """Adds self.unhoarded_tag to the raindrop's existing tags (merged, not
-        replaced -- Raindrop's PUT overwrites whatever tag list you send) and
-        moves it to self.unhoarded_collection_id if one is configured. Raises
-        on failure; the caller decides how to treat that (best-effort enrichment,
-        not a hard requirement)."""
-        get_resp = self.session.get(f"{API_BASE}/raindrop/{source_id}", timeout=15)
-        get_resp.raise_for_status()
-        current_tags = set(get_resp.json().get("item", {}).get("tags", []) or [])
-        current_tags.add(self.unhoarded_tag)
+        """Thin wrapper over apply_updates() using this adapter's configured
+        unhoarded tag/collection."""
+        self.apply_updates(
+            source_id, tags={self.unhoarded_tag}, collection_id=self.unhoarded_collection_id, note=note
+        )
 
-        body = {"tags": sorted(current_tags)}
-        if note:
+    def apply_updates(
+        self,
+        source_id: str,
+        tags: Optional[Iterable[str]] = None,
+        collection_id: Optional[int] = None,
+        note: Optional[str] = None,
+    ) -> None:
+        """Best-effort partial update to a Raindrop item, independent of any
+        local 'unhoarded' state. `tags`, if given, is merged into the item's
+        existing tags (not replaced -- Raindrop's PUT overwrites whatever tag
+        list you send). `collection_id` moves the item. `note` overwrites the
+        item's single note field -- Raindrop has no concept of multiple notes,
+        so whichever caller writes last wins. Any of the three can be omitted
+        to leave that aspect untouched. Raises on failure; the caller decides
+        how to treat that (best-effort enrichment, not a hard requirement)."""
+        body: dict = {}
+        if tags:
+            get_resp = self.session.get(f"{API_BASE}/raindrop/{source_id}", timeout=15)
+            get_resp.raise_for_status()
+            current_tags = set(get_resp.json().get("item", {}).get("tags", []) or [])
+            current_tags.update(tags)
+            body["tags"] = sorted(current_tags)
+        if collection_id is not None:
+            body["collection"] = {"$id": collection_id}
+        if note is not None:
             body["note"] = note
-        if self.unhoarded_collection_id is not None:
-            body["collection"] = {"$id": self.unhoarded_collection_id}
+        if not body:
+            return
 
         put_resp = self.session.put(f"{API_BASE}/raindrop/{source_id}", json=body, timeout=15)
         put_resp.raise_for_status()
+
+    def list_collections(self) -> list:
+        """Returns [{'id': int, 'title': str}, ...] for every collection in the
+        account (top-level and nested children), used to ground AI suggestions
+        in real collections and to resolve a suggested name back to the id
+        Raindrop's write API needs."""
+        collections = []
+        for endpoint in ("collections", "collections/childrens"):
+            resp = self.session.get(f"{API_BASE}/{endpoint}", timeout=15)
+            resp.raise_for_status()
+            for item in resp.json().get("items", []):
+                collections.append({"id": item.get("_id"), "title": item.get("title", "")})
+        return collections
 

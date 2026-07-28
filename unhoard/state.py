@@ -39,7 +39,12 @@ CREATE TABLE IF NOT EXISTS items (
     summary_date TEXT,
     content_hash TEXT,
     context_hash TEXT,
-    note TEXT
+    note TEXT,
+    suggested_tags TEXT,
+    suggested_collection TEXT,
+    tags_applied_at TEXT,
+    collection_applied_at TEXT,
+    summary_applied_at TEXT
 );
 """
 
@@ -53,14 +58,18 @@ class StateStore:
         self._migrate()
         self.conn.commit()
 
+    _MIGRATION_COLUMNS = [
+        "context_hash", "note", "suggested_tags", "suggested_collection",
+        "tags_applied_at", "collection_applied_at", "summary_applied_at",
+    ]
+
     def _migrate(self):
         """CREATE TABLE IF NOT EXISTS won't add columns to a table that already
         exists from an earlier version -- patch those in here."""
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
-        if "context_hash" not in cols:
-            self.conn.execute("ALTER TABLE items ADD COLUMN context_hash TEXT")
-        if "note" not in cols:
-            self.conn.execute("ALTER TABLE items ADD COLUMN note TEXT")
+        for name in self._MIGRATION_COLUMNS:
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE items ADD COLUMN {name} TEXT")
 
     @contextmanager
     def _cursor(self):
@@ -137,6 +146,28 @@ class StateStore:
                 (reason, note, key),
             )
 
+    def mark_applied(self, key: str, tags: bool = False, collection: bool = False, summary: bool = False):
+        """Records that `unhoard apply` successfully pushed a given aspect
+        (tags/collection/summary) so the digest stops nagging about suggestions
+        that have already been applied. Does not touch `status` -- an item can
+        be applied without being marked done or unhoarded."""
+        now = datetime.now(timezone.utc).isoformat()
+        fields, values = [], []
+        if tags:
+            fields.append("tags_applied_at=?")
+            values.append(now)
+        if collection:
+            fields.append("collection_applied_at=?")
+            values.append(now)
+        if summary:
+            fields.append("summary_applied_at=?")
+            values.append(now)
+        if not fields:
+            return
+        values.append(key)
+        with self._cursor() as cur:
+            cur.execute(f"UPDATE items SET {', '.join(fields)} WHERE key=?", values)
+
     def mark_snoozed(self, key: str, until: date):
         with self._cursor() as cur:
             cur.execute(
@@ -152,12 +183,24 @@ class StateStore:
                     (today, key),
                 )
 
-    def save_summary(self, key: str, summary: str, model: str, content_hash: str, context_hash: str):
+    def save_summary(
+        self,
+        key: str,
+        summary: str,
+        model: str,
+        content_hash: str,
+        context_hash: str,
+        suggested_tags: str = "",
+        suggested_collection: str = "",
+    ):
         with self._cursor() as cur:
             cur.execute(
                 """UPDATE items SET summary=?, summary_model=?, summary_date=?,
-                   content_hash=?, context_hash=? WHERE key=?""",
-                (summary, model, datetime.now(timezone.utc).isoformat(), content_hash, context_hash, key),
+                   content_hash=?, context_hash=?, suggested_tags=?, suggested_collection=? WHERE key=?""",
+                (
+                    summary, model, datetime.now(timezone.utc).isoformat(), content_hash, context_hash,
+                    suggested_tags, suggested_collection, key,
+                ),
             )
 
     def stats(self) -> dict:

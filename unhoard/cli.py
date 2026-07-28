@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date, timedelta
 
@@ -8,6 +9,23 @@ from .config import load_config, write_default_config, CONFIG_PATH
 from .digest import build_digest
 from .sources import build_adapters, find_adapter_for_source
 from .state import StateStore
+
+
+def _find_single_item(store: StateStore, key: str):
+    """Looks up exactly one item by key or key fragment. Prints an error and
+    returns None on no match or an ambiguous match -- callers should return 1."""
+    matches = store.find_by_prefix(key)
+    if not matches:
+        matches = store.conn.execute("SELECT * FROM items WHERE key LIKE ?", (f"%{key}%",)).fetchall()
+    if not matches:
+        print(f"No item found matching '{key}'.", file=sys.stderr)
+        return None
+    if len(matches) > 1:
+        print(f"Multiple items match '{key}' -- be more specific:", file=sys.stderr)
+        for m in matches[:20]:
+            print(f"  {m['key']}  {m['title']}", file=sys.stderr)
+        return None
+    return matches[0]
 
 
 def cmd_init(args) -> int:
@@ -85,21 +103,10 @@ def cmd_digest(args) -> int:
 def cmd_mark(args) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
-    matches = store.find_by_prefix(args.key)
-    if not matches:
-        matches = store.conn.execute(
-            "SELECT * FROM items WHERE key LIKE ?", (f"%{args.key}%",)
-        ).fetchall()
-    if not matches:
-        print(f"No item found matching '{args.key}'.", file=sys.stderr)
-        return 1
-    if len(matches) > 1:
-        print(f"Multiple items match '{args.key}' -- be more specific:", file=sys.stderr)
-        for m in matches[:20]:
-            print(f"  {m['key']}  {m['title']}", file=sys.stderr)
+    row = _find_single_item(store, args.key)
+    if row is None:
         return 1
 
-    row = matches[0]
     if args.unhoarded:
         if not args.note:
             print(
@@ -129,6 +136,84 @@ def cmd_mark(args) -> int:
     else:
         print("Specify --done, --unhoarded, or --snooze N", file=sys.stderr)
         return 1
+    return 0
+
+
+def cmd_apply(args) -> int:
+    cfg = load_config()
+    store = StateStore(cfg.state_db_path)
+    row = _find_single_item(store, args.key)
+    if row is None:
+        return 1
+
+    want_tags = args.all or args.tags
+    want_collection = args.all or args.collection
+    want_summary = args.all or args.summary
+    if not (want_tags or want_collection or want_summary):
+        print("Specify --tags, --collection, --summary, or --all", file=sys.stderr)
+        return 1
+
+    adapter = find_adapter_for_source(cfg, row["source"])
+    if adapter is None or not hasattr(adapter, "apply_updates"):
+        print(f"No write-back support for source '{row['source']}' -- nothing to apply.", file=sys.stderr)
+        return 1
+
+    tags = None
+    if want_tags:
+        try:
+            suggested_tags = json.loads(row["suggested_tags"] or "[]")
+        except json.JSONDecodeError:
+            suggested_tags = []
+        if suggested_tags:
+            tags = suggested_tags
+        else:
+            print("No suggested tags for this item -- run `unhoard digest` first.", file=sys.stderr)
+
+    collection_id = None
+    collection_title = None
+    if want_collection:
+        suggested_collection = row["suggested_collection"] or ""
+        if not suggested_collection:
+            print("No suggested collection for this item -- run `unhoard digest` first.", file=sys.stderr)
+        elif not hasattr(adapter, "list_collections"):
+            print(f"'{row['source']}' can't list collections -- skipping collection.", file=sys.stderr)
+        else:
+            match = next(
+                (c for c in adapter.list_collections() if c["title"].lower() == suggested_collection.lower()),
+                None,
+            )
+            if match:
+                collection_id, collection_title = match["id"], match["title"]
+            else:
+                print(
+                    f"Suggested collection '{suggested_collection}' no longer exists -- skipping.",
+                    file=sys.stderr,
+                )
+
+    note = row["summary"] or None if want_summary else None
+    if want_summary and note is None:
+        print("No AI summary for this item -- run `unhoard digest` first.", file=sys.stderr)
+
+    if tags is None and collection_id is None and note is None:
+        print("Nothing to apply.", file=sys.stderr)
+        return 1
+
+    try:
+        adapter.apply_updates(row["source_id"], tags=tags, collection_id=collection_id, note=note)
+    except Exception as e:  # noqa: BLE001 -- report, don't crash
+        print(f"error: couldn't apply to {row['source']}: {e}", file=sys.stderr)
+        return 1
+
+    store.mark_applied(row["key"], tags=tags is not None, collection=collection_id is not None, summary=note is not None)
+
+    applied = []
+    if tags is not None:
+        applied.append(f"tags ({', '.join(tags)})")
+    if collection_id is not None:
+        applied.append(f"collection ({collection_title})")
+    if note is not None:
+        applied.append("summary as note")
+    print(f"Applied to {row['title']}: {', '.join(applied)}")
     return 0
 
 
@@ -178,6 +263,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mark_p.add_argument("--snooze", type=int, metavar="DAYS", help="Hide for N days")
     mark_p.set_defaults(func=cmd_mark)
+
+    apply_p = sub.add_parser(
+        "apply", help="Push AI-suggested tags/collection or the AI summary to the source, on demand"
+    )
+    apply_p.add_argument("key", help="Item key, e.g. raindrop:12345 (a unique fragment also works)")
+    apply_p.add_argument("--tags", action="store_true", help="Apply the suggested tags")
+    apply_p.add_argument("--collection", action="store_true", help="Move to the suggested collection")
+    apply_p.add_argument("--summary", action="store_true", help="Write the AI summary into the source's note field")
+    apply_p.add_argument("--all", action="store_true", help="Apply tags, collection, and summary")
+    apply_p.set_defaults(func=cmd_apply)
 
     stats_p = sub.add_parser("stats", help="Show counts by status and source")
     stats_p.set_defaults(func=cmd_stats)
