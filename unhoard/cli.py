@@ -95,7 +95,16 @@ def cmd_mark(args) -> int:
         return 1
 
     row = matches[0]
-    if args.done:
+    if args.unhoarded:
+        if not args.note:
+            print(
+                "warning: --unhoarded without --note -- 'properly sourced' is half the "
+                "definition, consider recording where/how this was used",
+                file=sys.stderr,
+            )
+        store.mark_unhoarded(row["key"], note=args.note or "")
+        print(f"Unhoarded: {row['title']}")
+    elif args.done:
         store.mark_done(row["key"], reason="marked done via CLI")
         print(f"Done: {row['title']}")
     elif args.snooze is not None:
@@ -103,7 +112,7 @@ def cmd_mark(args) -> int:
         store.mark_snoozed(row["key"], until)
         print(f"Snoozed until {until.isoformat()}: {row['title']}")
     else:
-        print("Specify --done or --snooze N", file=sys.stderr)
+        print("Specify --done, --unhoarded, or --snooze N", file=sys.stderr)
         return 1
     return 0
 
@@ -141,9 +150,17 @@ def build_parser() -> argparse.ArgumentParser:
     digest_p.add_argument("--print", action="store_true", help="Also print the digest to stdout")
     digest_p.set_defaults(func=cmd_digest)
 
-    mark_p = sub.add_parser("mark", help="Mark an item done or snoozed by its key (or a fragment of it)")
+    mark_p = sub.add_parser("mark", help="Mark an item done, unhoarded, or snoozed by its key (or a fragment of it)")
     mark_p.add_argument("key", help="Item key, e.g. raindrop:12345 (a unique fragment also works)")
-    mark_p.add_argument("--done", action="store_true", help="Mark as handled")
+    mark_p.add_argument("--done", action="store_true", help="Mark as handled (closed out, not necessarily used)")
+    mark_p.add_argument(
+        "--unhoarded", action="store_true",
+        help="Mark as unhoarded: synthesized, stored, and properly sourced elsewhere",
+    )
+    mark_p.add_argument(
+        "--note", type=str,
+        help="Provenance note for --unhoarded: where/how this was used",
+    )
     mark_p.add_argument("--snooze", type=int, metavar="DAYS", help="Hide for N days")
     mark_p.set_defaults(func=cmd_mark)
 

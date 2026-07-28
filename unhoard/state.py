@@ -31,14 +31,15 @@ CREATE TABLE IF NOT EXISTS items (
     last_synced TEXT,
     times_shown INTEGER DEFAULT 0,
     last_shown_date TEXT,
-    status TEXT DEFAULT 'active',   -- active | done | snoozed
+    status TEXT DEFAULT 'active',   -- active | done | snoozed | unhoarded
     status_reason TEXT,
     snooze_until TEXT,
     summary TEXT,
     summary_model TEXT,
     summary_date TEXT,
     content_hash TEXT,
-    context_hash TEXT
+    context_hash TEXT,
+    note TEXT
 );
 """
 
@@ -58,6 +59,8 @@ class StateStore:
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
         if "context_hash" not in cols:
             self.conn.execute("ALTER TABLE items ADD COLUMN context_hash TEXT")
+        if "note" not in cols:
+            self.conn.execute("ALTER TABLE items ADD COLUMN note TEXT")
 
     @contextmanager
     def _cursor(self):
@@ -124,6 +127,15 @@ class StateStore:
     def mark_done(self, key: str, reason: str = "marked done"):
         with self._cursor() as cur:
             cur.execute("UPDATE items SET status='done', status_reason=? WHERE key=?", (reason, key))
+
+    def mark_unhoarded(self, key: str, note: str = "", reason: str = "unhoarded via CLI"):
+        """Distinct from mark_done: means the information was actually synthesized,
+        stored, and properly sourced elsewhere -- not just closed out or ignored."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE items SET status='unhoarded', status_reason=?, note=? WHERE key=?",
+                (reason, note, key),
+            )
 
     def mark_snoozed(self, key: str, until: date):
         with self._cursor() as cur:
