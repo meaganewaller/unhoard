@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import date, datetime, timezone
+
+from rich.markup import escape
+from rich.progress import track
 
 from .config import Config
 from .sources import find_adapter_for_source
 from .state import StateStore
 from .summarize import context_hash as compute_context_hash
 from .summarize import summarize as ai_summarize
+from .ui import console, print_warning
 
 
 def _age_days(created_at_iso: str) -> int:
@@ -61,7 +64,13 @@ def build_digest(cfg: Config, store: StateStore) -> tuple[str, str]:
         lines.append("## \U0001f578\ufe0f Stale backlog (the whole point)\n")
         needs_fresh = cfg.anthropic_enabled and any(_needs_fresh_summary(cfg, row) for _, row in selected["stale"])
         collection_names = _fetch_collection_names(cfg) if needs_fresh else []
-        for age, row in selected["stale"]:
+        # Only show a progress bar when there's actual summarization work to do --
+        # a fully-cached digest renders instantly and a progress bar would be noise.
+        stale_iter = (
+            track(selected["stale"], description="Summarizing stale items...", console=console)
+            if needs_fresh else selected["stale"]
+        )
+        for age, row in stale_iter:
             lines.append(_render_stale_item(cfg, store, row, age, collection_names))
             shown_keys.append(row["key"])
 
@@ -97,11 +106,11 @@ def _tags_str(row) -> str:
 def _render_metadata_item(row, age: int) -> str:
     tags = _tags_str(row)
     tag_part = f" `{tags}`" if tags else ""
-    excerpt = f"\n  > {row['excerpt']}" if row["excerpt"] else ""
-    return (
-        f"- **[{row['title']}]({row['url']})** -- {age}d old, via `{row['source']}`{tag_part}"
-        f"{excerpt}\n  <sub>key: `{row['key']}`</sub>"
-    )
+    lines = [f"- **[{row['title']}]({row['url']})** -- {age}d old, via `{row['source']}`{tag_part}"]
+    if row["excerpt"]:
+        lines += ["", f"  > {row['excerpt']}"]
+    lines += ["", f"  *key: `{row['key']}`*"]
+    return "\n".join(lines)
 
 
 def _fetch_collection_names(cfg: Config) -> list:
@@ -115,7 +124,7 @@ def _fetch_collection_names(cfg: Config) -> list:
     try:
         return [c["title"] for c in adapter.list_collections()]
     except Exception as e:  # noqa: BLE001 -- grounding data is best-effort, never fatal
-        print(f"[digest] couldn't fetch collections for suggestions: {e}", file=sys.stderr)
+        print_warning(f"couldn't fetch collections for suggestions: {escape(str(e))}")
         return []
 
 
@@ -138,7 +147,7 @@ def _suggestion_line(row, tags: list, collection: str) -> str:
         parts.append(f"collection: {collection}")
     if not parts:
         return ""
-    return f"  <sub>suggested -- {' | '.join(parts)} (apply with `unhoard apply <key>`)</sub>\n"
+    return f"*suggested -- {' | '.join(parts)} (apply with `unhoard apply <key>`)*"
 
 
 def _needs_fresh_summary(cfg: Config, row) -> bool:
@@ -166,8 +175,13 @@ def _render_stale_item(cfg: Config, store: StateStore, row, age: int, collection
         if parsed.get("raw"):
             # Display/store just Summary+Action -- tags/collection are surfaced via
             # the dedicated suggestion line below, not duplicated in the body text.
-            if parsed.get("summary") or parsed.get("action"):
-                summary_text = f"Summary: {parsed.get('summary', '')}\nAction: {parsed.get('action', '')}"
+            # Kept on one line: markdown blockquotes only get a real line break with
+            # a blank line between them, which would be a lot of vertical space here.
+            summary_part, action_part = parsed.get("summary", ""), parsed.get("action", "")
+            if summary_part or action_part:
+                summary_text = summary_part
+                if action_part:
+                    summary_text = f"{summary_text} **Action:** {action_part}".strip()
             else:
                 summary_text = parsed["raw"]
             suggested_tags = parsed.get("tags", [])
@@ -180,11 +194,16 @@ def _render_stale_item(cfg: Config, store: StateStore, row, age: int, collection
     tags = _tags_str(row)
     tag_part = f" `{tags}`" if tags else ""
     body = summary_text if summary_text else (row["excerpt"] or "_(no summary or excerpt available)_")
-    note = "" if summary_text else " <sub>(AI summary unavailable -- showing saved excerpt)</sub>"
-    return (
-        f"- **[{row['title']}]({row['url']})** -- {age}d old, via `{row['source']}`{tag_part}\n"
-        f"  > {body}{note}\n"
-        f"{_suggestion_line(row, suggested_tags, suggested_collection)}"
-        f"  <sub>key: `{row['key']}`</sub>"
-    )
+    note = "" if summary_text else " *(AI summary unavailable -- showing saved excerpt)*"
+    suggestion = _suggestion_line(row, suggested_tags, suggested_collection)
+
+    lines = [
+        f"- **[{row['title']}]({row['url']})** -- {age}d old, via `{row['source']}`{tag_part}",
+        "",
+        f"  > {body}{note}",
+    ]
+    if suggestion:
+        lines += ["", f"  {suggestion}"]
+    lines += ["", f"  *key: `{row['key']}`*"]
+    return "\n".join(lines)
 

@@ -5,46 +5,71 @@ import json
 import sys
 from datetime import date, timedelta
 
+import questionary
+from rich.markdown import Markdown
+from rich.markup import escape
+from rich.panel import Panel
+from rich.table import Table
+
 from .config import load_config, write_default_config, CONFIG_PATH
 from .digest import build_digest
 from .sources import build_adapters, find_adapter_for_source
 from .state import StateStore
+from .ui import console, err_console, print_error, print_success, print_warning
+
+
+def _is_interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def _find_single_item(store: StateStore, key: str):
-    """Looks up exactly one item by key or key fragment. Prints an error and
-    returns None on no match or an ambiguous match -- callers should return 1."""
+    """Looks up exactly one item by key or key fragment. On an ambiguous match,
+    offers an interactive picker in a real terminal; scripted/piped/cron usage
+    (no tty) keeps the old behavior of printing the list and returning None --
+    there's no one there to answer a prompt. Returns None (callers should
+    return 1) on no match, a cancelled picker, or a non-interactive ambiguous
+    match."""
     matches = store.find_by_prefix(key)
     if not matches:
         matches = store.conn.execute("SELECT * FROM items WHERE key LIKE ?", (f"%{key}%",)).fetchall()
     if not matches:
-        print(f"No item found matching '{key}'.", file=sys.stderr)
+        print_error(f"no item found matching '{escape(key)}'.")
         return None
     if len(matches) > 1:
-        print(f"Multiple items match '{key}' -- be more specific:", file=sys.stderr)
+        if _is_interactive():
+            choices = [questionary.Choice(title=f"{m['key']}  {m['title']}", value=m) for m in matches[:20]]
+            return questionary.select(f"Multiple items match '{key}' -- pick one:", choices=choices).ask()
+        print_warning(f"multiple items match '{escape(key)}' -- be more specific:")
         for m in matches[:20]:
-            print(f"  {m['key']}  {m['title']}", file=sys.stderr)
+            err_console.print(f"  [cyan]{escape(m['key'])}[/cyan]  {escape(m['title'])}")
         return None
     return matches[0]
 
 
 def cmd_init(args) -> int:
     path = write_default_config(force=args.force)
-    print(f"Config written to {path}")
-    print(
-        "\nNext steps:\n"
-        "  1. export RAINDROP_TOKEN=...   (https://app.raindrop.io/settings/integrations)\n"
-        "  2. export ANTHROPIC_API_KEY=... (optional -- enables AI summaries for stale items)\n"
-        "  3. Add [[sources]] tables to the config if you want Chrome/Safari/JSON sources too.\n"
-        "  4. unhoard sync\n"
-        "  5. unhoard digest\n\n"
-        f"{path} also has commented-out examples worth a look:\n"
-        "  - context: tells the summarizer about your own projects, so it stops recommending\n"
+    print_success(f"Config written to {escape(str(path))}")
+
+    next_steps = (
+        "1. export RAINDROP_TOKEN=...   (https://app.raindrop.io/settings/integrations)\n"
+        "2. export ANTHROPIC_API_KEY=... (optional -- enables AI summaries for stale items)\n"
+        f"3. Add {escape('[[sources]]')} tables to the config if you want Chrome/Safari/JSON sources too.\n"
+        "4. unhoard sync\n"
+        "5. unhoard digest"
+    )
+    console.print(Panel(next_steps, title="Next steps", border_style="cyan", expand=False))
+
+    console.print(
+        f"\n[dim]{escape(str(path))}[/dim] also has commented-out examples worth a look:\n"
+        "  - [bold]context[/bold]: tells the summarizer about your own projects, so it stops recommending\n"
         "    Delete on stale items you actually want (e.g. old-web reference material)\n"
-        "  - unhoarded_tag / unhoarded_collection_id: how `mark <key> --unhoarded` writes back\n"
-        "    to Raindrop (tag and/or collection move)\n\n"
-        "For cron (every morning at 7am):\n"
-        "  0 7 * * * /usr/bin/env unhoard sync && unhoard digest\n"
+        "  - [bold]unhoarded_tag[/bold] / [bold]unhoarded_collection_id[/bold]: how `mark <key> --unhoarded` "
+        "writes back\n"
+        "    to Raindrop (tag and/or collection move)\n"
+    )
+    console.print(
+        "[bold]For cron[/bold] (every morning at 7am):\n"
+        "  0 7 * * * /usr/bin/env unhoard sync && unhoard digest"
     )
     return 0
 
@@ -55,35 +80,34 @@ def cmd_sync(args) -> int:
     try:
         adapters = build_adapters(cfg, args.source)
     except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
+        print_error(escape(str(e)))
         return 1
 
     if not adapters:
-        print(
-            "No sources configured. Set RAINDROP_TOKEN for the simplest setup, "
-            "or add [[sources]] to your config (see `unhoard init`), "
-            "or pass --source chrome / --source safari / --source json:<path>.",
-            file=sys.stderr,
+        print_error(
+            "no sources configured. Set RAINDROP_TOKEN for the simplest setup, "
+            f"or add {escape('[[sources]]')} to your config (see `unhoard init`), "
+            "or pass --source chrome / --source safari / --source json:<path>."
         )
         return 1
 
     total = 0
     for label, adapter in adapters:
-        print(f"Syncing {label}...")
+        console.print(f"Syncing [bold]{escape(label)}[/bold]...")
         try:
             items = list(adapter.fetch())
         except Exception as e:  # noqa: BLE001
-            print(f"  failed: {e}", file=sys.stderr)
+            err_console.print(f"  [red]failed:[/red] {escape(str(e))}")
             continue
         if not items:
-            print("  0 items")
+            console.print("  [dim]0 items[/dim]")
             continue
         seen_keys = store.upsert_items(items)
         actual_sources = {it.source for it in items}
         closed = sum(store.mark_missing_as_done(src, seen_keys) for src in actual_sources)
-        print(f"  {len(items)} items ({closed} closed -- handled outside the tool since last sync)")
+        console.print(f"  [bold]{len(items)}[/bold] items ({closed} closed -- handled outside the tool since last sync)")
         total += len(items)
-    print(f"\nSync complete: {total} items processed across {len(adapters)} source(s).")
+    print_success(f"Sync complete: {total} items processed across {len(adapters)} source(s).")
     return 0
 
 
@@ -94,9 +118,10 @@ def cmd_digest(args) -> int:
     out_path = cfg.output_dir / filename
     out_path.write_text(markdown)
     (cfg.output_dir / "latest.md").write_text(markdown)
-    print(f"Digest written to {out_path}")
+    print_success(f"Digest written to {escape(str(out_path))}")
     if args.print:
-        print("\n" + markdown)
+        console.print()
+        console.print(Markdown(markdown))
     return 0
 
 
@@ -109,32 +134,31 @@ def cmd_mark(args) -> int:
 
     if args.unhoarded:
         if not args.note:
-            print(
-                "warning: --unhoarded without --note -- 'properly sourced' is half the "
-                "definition, consider recording where/how this was used",
-                file=sys.stderr,
+            print_warning(
+                "--unhoarded without --note -- 'properly sourced' is half the "
+                "definition, consider recording where/how this was used"
             )
         store.mark_unhoarded(row["key"], note=args.note or "")
-        print(f"Unhoarded: {row['title']}")
+        print_success(f"Unhoarded: {escape(row['title'])}")
 
         adapter = find_adapter_for_source(cfg, row["source"])
         if adapter is None or not hasattr(adapter, "mark_unhoarded"):
-            print(f"  (no write-back support for source '{row['source']}' -- local state only)", file=sys.stderr)
+            print_warning(f"no write-back support for source '{escape(row['source'])}' -- local state only")
         else:
             try:
                 adapter.mark_unhoarded(row["source_id"], note=args.note or None)
-                print(f"  also marked unhoarded in {row['source']}")
+                console.print(f"  [dim]also marked unhoarded in {escape(row['source'])}[/dim]")
             except Exception as e:  # noqa: BLE001 -- write-back is best-effort; local state already saved
-                print(f"  warning: couldn't write back to {row['source']}: {e}", file=sys.stderr)
+                print_warning(f"couldn't write back to {escape(row['source'])}: {escape(str(e))}")
     elif args.done:
         store.mark_done(row["key"], reason="marked done via CLI")
-        print(f"Done: {row['title']}")
+        print_success(f"Done: {escape(row['title'])}")
     elif args.snooze is not None:
         until = date.today() + timedelta(days=args.snooze)
         store.mark_snoozed(row["key"], until)
-        print(f"Snoozed until {until.isoformat()}: {row['title']}")
+        print_success(f"Snoozed until {until.isoformat()}: {escape(row['title'])}")
     else:
-        print("Specify --done, --unhoarded, or --snooze N", file=sys.stderr)
+        print_error("specify --done, --unhoarded, or --snooze N")
         return 1
     return 0
 
@@ -150,12 +174,12 @@ def cmd_apply(args) -> int:
     want_collection = args.all or args.collection
     want_summary = args.all or args.summary
     if not (want_tags or want_collection or want_summary):
-        print("Specify --tags, --collection, --summary, or --all", file=sys.stderr)
+        print_error("specify --tags, --collection, --summary, or --all")
         return 1
 
     adapter = find_adapter_for_source(cfg, row["source"])
     if adapter is None or not hasattr(adapter, "apply_updates"):
-        print(f"No write-back support for source '{row['source']}' -- nothing to apply.", file=sys.stderr)
+        print_error(f"no write-back support for source '{escape(row['source'])}' -- nothing to apply.")
         return 1
 
     tags = None
@@ -167,16 +191,16 @@ def cmd_apply(args) -> int:
         if suggested_tags:
             tags = suggested_tags
         else:
-            print("No suggested tags for this item -- run `unhoard digest` first.", file=sys.stderr)
+            print_warning("no suggested tags for this item -- run `unhoard digest` first.")
 
     collection_id = None
     collection_title = None
     if want_collection:
         suggested_collection = row["suggested_collection"] or ""
         if not suggested_collection:
-            print("No suggested collection for this item -- run `unhoard digest` first.", file=sys.stderr)
+            print_warning("no suggested collection for this item -- run `unhoard digest` first.")
         elif not hasattr(adapter, "list_collections"):
-            print(f"'{row['source']}' can't list collections -- skipping collection.", file=sys.stderr)
+            print_warning(f"'{escape(row['source'])}' can't list collections -- skipping collection.")
         else:
             match = next(
                 (c for c in adapter.list_collections() if c["title"].lower() == suggested_collection.lower()),
@@ -185,35 +209,32 @@ def cmd_apply(args) -> int:
             if match:
                 collection_id, collection_title = match["id"], match["title"]
             else:
-                print(
-                    f"Suggested collection '{suggested_collection}' no longer exists -- skipping.",
-                    file=sys.stderr,
-                )
+                print_warning(f"suggested collection '{escape(suggested_collection)}' no longer exists -- skipping.")
 
     note = row["summary"] or None if want_summary else None
     if want_summary and note is None:
-        print("No AI summary for this item -- run `unhoard digest` first.", file=sys.stderr)
+        print_warning("no AI summary for this item -- run `unhoard digest` first.")
 
     if tags is None and collection_id is None and note is None:
-        print("Nothing to apply.", file=sys.stderr)
+        print_error("nothing to apply.")
         return 1
 
     try:
         adapter.apply_updates(row["source_id"], tags=tags, collection_id=collection_id, note=note)
     except Exception as e:  # noqa: BLE001 -- report, don't crash
-        print(f"error: couldn't apply to {row['source']}: {e}", file=sys.stderr)
+        print_error(f"couldn't apply to {escape(row['source'])}: {escape(str(e))}")
         return 1
 
     store.mark_applied(row["key"], tags=tags is not None, collection=collection_id is not None, summary=note is not None)
 
     applied = []
     if tags is not None:
-        applied.append(f"tags ({', '.join(tags)})")
+        applied.append(f"tags ({escape(', '.join(tags))})")
     if collection_id is not None:
-        applied.append(f"collection ({collection_title})")
+        applied.append(f"collection ({escape(collection_title)})")
     if note is not None:
         applied.append("summary as note")
-    print(f"Applied to {row['title']}: {', '.join(applied)}")
+    print_success(f"Applied to {escape(row['title'])}: {', '.join(applied)}")
     return 0
 
 
@@ -221,12 +242,20 @@ def cmd_stats(args) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
     s = store.stats()
-    print("By status:")
+
+    status_table = Table(title="By status")
+    status_table.add_column("Status")
+    status_table.add_column("Count", justify="right")
     for status, count in s["by_status"].items():
-        print(f"  {status}: {count}")
-    print("Active items by source:")
+        status_table.add_row(status, str(count))
+    console.print(status_table)
+
+    source_table = Table(title="Active items by source")
+    source_table.add_column("Source")
+    source_table.add_column("Count", justify="right")
     for source, count in s["active_by_source"].items():
-        print(f"  {source}: {count}")
+        source_table.add_row(source, str(count))
+    console.print(source_table)
     return 0
 
 

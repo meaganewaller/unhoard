@@ -80,6 +80,16 @@ unhoard apply <key> --all        # push suggested tags/collection + AI summary t
 
 `digest` always writes both `digest-YYYY-MM-DD.md` and `latest.md` (same content) so cronjobs / scripts can always read a stable filename.
 
+## CLI Experience
+
+Output across `sync`/`mark`/`apply`/`stats`/`init` is color-coded (green success, yellow warning, red error) via [rich](https://github.com/Textualize/rich); `stats` renders as tables. `digest --print` renders the digest as formatted Markdown in the terminal instead of dumping raw source -- the saved `digest-YYYY-MM-DD.md`/`latest.md` files are untouched, still plain markdown for cron/scripts/Claude Code to read.
+
+When `digest` actually needs to call the AI for one or more stale items, you'll see a progress bar; a fully-cached digest (nothing to summarize) skips it entirely and renders instantly, same as before.
+
+If a `mark`/`apply` key fragment matches more than one item, you get an interactive picker (via [questionary](https://github.com/tmbo/questionary)) to choose which one -- but only in a real terminal. Piped output, scripts, and cron jobs (no tty attached) get the old behavior: the match list printed to stderr and a non-zero exit, so nothing hangs waiting on input that'll never come.
+
+All of this degrades gracefully when piped or redirected -- rich detects non-terminal output and drops color/table-drawing in favor of plain readable text automatically.
+
 ## What "Unhoarded" Means
 
 `--done` just means "stop showing me this" -- you might have read it, ignored it, or decided you don't care. `--unhoarded` means something stronger: you actually synthesized and stored the information somewhere, and properly sourced/cited it back to the original. An old-web tutorial you folded into a retrospective page with a link back is unhoarded; one you skimmed and closed is just done.
@@ -128,7 +138,7 @@ Changing `context` invalidates cached summaries for stale items (compared cheapl
 Alongside Summary/Action, stale items also get a suggested set of tags and a suggested destination collection, shown in the digest like:
 
 ```
-<sub>suggested -- tags: geocities, blinkie | collection: Old Web Archive (apply with `unhoard apply <key>`)</sub>
+*suggested -- tags: geocities, blinkie | collection: Old Web Archive (apply with `unhoard apply <key>`)*
 ```
 
 The collection suggestion is grounded in your real Raindrop collections (fetched once per digest run, only when something actually needs summarizing) -- the model picks from your existing collections or says "none," it doesn't invent new ones. Sources without collections (Chrome, Safari, generic JSON) just don't get a collection suggestion.
