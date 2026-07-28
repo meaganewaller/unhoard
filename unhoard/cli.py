@@ -20,6 +20,11 @@ def cmd_init(args) -> int:
         "  3. Add [[sources]] tables to the config if you want Chrome/Safari/JSON sources too.\n"
         "  4. unhoard sync\n"
         "  5. unhoard digest\n\n"
+        f"{path} also has commented-out examples worth a look:\n"
+        "  - context: tells the summarizer about your own projects, so it stops recommending\n"
+        "    Delete on stale items you actually want (e.g. old-web reference material)\n"
+        "  - unhoarded_tag / unhoarded_collection_id: how `mark <key> --unhoarded` writes back\n"
+        "    to Raindrop (tag and/or collection move)\n\n"
         "For cron (every morning at 7am):\n"
         "  0 7 * * * /usr/bin/env unhoard sync && unhoard digest\n"
     )
