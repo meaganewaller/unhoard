@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import date, timedelta
 
@@ -15,7 +16,13 @@ from .config import load_config, write_default_config, CONFIG_PATH
 from .digest import build_digest
 from .sources import build_adapters, find_adapter_for_source
 from .state import StateStore
+from .summarize import fetch_article_text
 from .ui import console, err_console, print_error, print_success, print_warning
+
+
+def _slugify(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return slug[:80] or "untitled"
 
 
 def _is_interactive() -> bool:
@@ -238,6 +245,53 @@ def cmd_apply(args) -> int:
     return 0
 
 
+def cmd_synthesize(args) -> int:
+    cfg = load_config()
+    store = StateStore(cfg.state_db_path)
+    row = _find_single_item(store, args.key)
+    if row is None:
+        return 1
+
+    article_text = fetch_article_text(row["url"])
+    if not article_text:
+        print_error("couldn't fetch article text for this item -- nothing to synthesize.")
+        return 1
+
+    synth_dir = cfg.output_dir / "synthesized"
+    synth_dir.mkdir(parents=True, exist_ok=True)
+    out_path = synth_dir / f"{_slugify(row['title'])}.md"
+
+    if out_path.exists() and not args.force:
+        print_warning(f"{escape(str(out_path))} already exists -- skipping (use --force to overwrite).")
+        return 1
+
+    try:
+        tags = json.loads(row["tags"] or "[]")
+    except json.JSONDecodeError:
+        tags = []
+
+    frontmatter = "\n".join([
+        "---",
+        f"title: {json.dumps(row['title'])}",
+        f"url: {json.dumps(row['url'])}",
+        f"source: {json.dumps(row['source'])}",
+        f"key: {json.dumps(row['key'])}",
+        f"tags: {json.dumps(tags)}",
+        f"synthesized_at: {date.today().isoformat()}",
+        "---",
+    ])
+
+    body_parts = [f"# {row['title']}"]
+    if row["summary"]:
+        body_parts += ["## Summary", row["summary"]]
+    body_parts += ["## Full Text", article_text]
+
+    out_path.write_text(frontmatter + "\n\n" + "\n\n".join(body_parts) + "\n")
+    store.mark_synthesized(row["key"])
+    print_success(f"Synthesized note written to {escape(str(out_path))}")
+    return 0
+
+
 def cmd_stats(args) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
@@ -302,6 +356,13 @@ def build_parser() -> argparse.ArgumentParser:
     apply_p.add_argument("--summary", action="store_true", help="Write the AI summary into the source's note field")
     apply_p.add_argument("--all", action="store_true", help="Apply tags, collection, and summary")
     apply_p.set_defaults(func=cmd_apply)
+
+    synthesize_p = sub.add_parser(
+        "synthesize", help="Pull the full article text into a standalone markdown note for your own writing"
+    )
+    synthesize_p.add_argument("key", help="Item key, e.g. raindrop:12345 (a unique fragment also works)")
+    synthesize_p.add_argument("--force", action="store_true", help="Overwrite an existing note for this item")
+    synthesize_p.set_defaults(func=cmd_synthesize)
 
     stats_p = sub.add_parser("stats", help="Show counts by status and source")
     stats_p.set_defaults(func=cmd_stats)

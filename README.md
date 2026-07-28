@@ -76,9 +76,12 @@ unhoard mark <key> --done        # e.g., unhoard mark raindrop:123456 --done
 unhoard mark <key> --unhoarded --note "..."  # see "What 'Unhoarded' Means" below
 unhoard mark <key> --snoze 14    # hide for 2 weeks
 unhoard apply <key> --all        # push suggested tags/collection + AI summary to the source
+unhoard synthesize <key>         # pull the full article text into a standalone note to work from
 ```
 
 `digest` always writes both `digest-YYYY-MM-DD.md` and `latest.md` (same content) so cronjobs / scripts can always read a stable filename.
+
+`synthesize` writes to `<output_dir>/synthesized/<slug>.md` -- frontmatter (title/url/source/tags) plus the AI summary (if cached) and the full fetched article text, real material to actually work from instead of just a link. It won't overwrite a note you've already started editing unless you pass `--force`. This is distinct from `--unhoarded`: synthesize just pulls the raw material in, `--unhoarded --note` is the separate, later step of recording that you actually used it somewhere.
 
 ## CLI Experience
 

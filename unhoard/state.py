@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS items (
     suggested_collection TEXT,
     tags_applied_at TEXT,
     collection_applied_at TEXT,
-    summary_applied_at TEXT
+    summary_applied_at TEXT,
+    synthesized_at TEXT
 );
 """
 
@@ -60,7 +61,7 @@ class StateStore:
 
     _MIGRATION_COLUMNS = [
         "context_hash", "note", "suggested_tags", "suggested_collection",
-        "tags_applied_at", "collection_applied_at", "summary_applied_at",
+        "tags_applied_at", "collection_applied_at", "summary_applied_at", "synthesized_at",
     ]
 
     def _migrate(self):
@@ -167,6 +168,17 @@ class StateStore:
         values.append(key)
         with self._cursor() as cur:
             cur.execute(f"UPDATE items SET {', '.join(fields)} WHERE key=?", values)
+
+    def mark_synthesized(self, key: str):
+        """Records that `unhoard synthesize` wrote a standalone note for this item.
+        Informational only -- the actual overwrite-safety check is a real
+        file-existence check on disk, not this flag, so it stays correct even if
+        the DB and filesystem ever drift."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE items SET synthesized_at=? WHERE key=?",
+                (datetime.now(timezone.utc).isoformat(), key),
+            )
 
     def mark_snoozed(self, key: str, until: date):
         with self._cursor() as cur:
