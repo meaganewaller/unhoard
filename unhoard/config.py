@@ -8,6 +8,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 CONFIG_DIR = Path(os.environ.get("UNHOARD_HOME", Path.home() / ".config" / "unhoard"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -31,6 +32,8 @@ class Config:
     max_tokens_summary: int = 300
     context: str = ""                 # free-text notes on your projects/interests, given to the
                                        # summarizer so Action recommendations account for them
+    unhoarded_tag: str = "unhoarded"  # tag applied to a Raindrop item on `mark --unhoarded`
+    unhoarded_collection_id: Optional[int] = None  # if set, also move the item to this collection
 
     @property
     def anthropic_enabled(self) -> bool:
@@ -66,6 +69,10 @@ def load_config() -> Config:
     cfg.max_stale = pick("max_stale", "UNHOARD_MAX_STALE", int)
     cfg.model = pick("model", "UNHOARD_MODEL")
     cfg.context = pick("context", "UNHOARD_CONTEXT")
+    cfg.unhoarded_tag = pick("unhoarded_tag", "UNHOARD_UNHOARDED_TAG")
+    cfg.unhoarded_collection_id = pick(
+        "unhoarded_collection_id", "UNHOARD_UNHOARDED_COLLECTION_ID", int
+    )
 
     state_db = file_cfg.get("state_db_path")
     if state_db:
@@ -100,7 +107,9 @@ def write_default_config(force: bool = False) -> Path:
         '#   tutorials, GeoCities-era design patterns, old CSS tricks. These often read\n'
         '#   as "outdated" but are reference material I actively reuse -- don\'t\n'
         '#   recommend Delete for nostalgic/archival web content like this.\n'
-        '# """\n'
+        '# """\n\n'
+        '# unhoarded_tag = "unhoarded"       # tag applied on `mark <key> --unhoarded` (Raindrop)\n'
+        '# unhoarded_collection_id = 12345   # optional -- also move it to this collection\n'
     )
     return CONFIG_PATH
 

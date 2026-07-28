@@ -36,16 +36,40 @@ def build_adapters(cfg: Config, cli_sources: Optional[list[str]] = None) -> list
             cls = REGISTRY.get(stype)
             if not cls:
                 raise ValueError(f"Unknown source type '{stype}' in config.toml [[sources]]")
-            if stype == "raindrop" and "token" not in entry:
-                entry["token"] = cfg.raindrop_token
+            if stype == "raindrop":
+                entry.setdefault("token", cfg.raindrop_token)
+                entry.setdefault("unhoarded_tag", cfg.unhoarded_tag)
+                entry.setdefault("unhoarded_collection_id", cfg.unhoarded_collection_id)
             adapters.append((label, cls(**entry)))
         return adapters
 
     # No [[sources]] table configured at all -- fall back to raindrop-only,
     # which is the simplest possible setup (just a token, no config file needed).
     if cfg.raindrop_token:
-        return [("raindrop", REGISTRY["raindrop"](cfg.raindrop_token, cfg.collection_id))]
+        return [(
+            "raindrop",
+            REGISTRY["raindrop"](
+                cfg.raindrop_token, cfg.collection_id,
+                unhoarded_tag=cfg.unhoarded_tag, unhoarded_collection_id=cfg.unhoarded_collection_id,
+            ),
+        )]
     return []
+
+
+def find_adapter_for_source(cfg: Config, source: str) -> Optional[object]:
+    """Best-effort lookup of a configured adapter instance matching an item's
+    stored `source` (e.g. 'raindrop', or 'json:pocket'). Used for optional
+    write-back on `mark --unhoarded` -- returns None if nothing matches or
+    adapters can't be built at all; callers should treat that as 'no write-back
+    available', not an error."""
+    try:
+        adapters = build_adapters(cfg)
+    except ValueError:
+        return None
+    for _, adapter in adapters:
+        if getattr(adapter, "name", None) == source or getattr(adapter, "source_label", None) == source:
+            return adapter
+    return None
 
 
 def _build_from_spec(spec: str, cfg: Config) -> tuple[str, object]:
@@ -54,7 +78,10 @@ def _build_from_spec(spec: str, cfg: Config) -> tuple[str, object]:
     if not cls:
         raise ValueError(f"Unknown source type '{stype}' (known: {', '.join(REGISTRY)})")
     if stype == "raindrop":
-        return ("raindrop", cls(cfg.raindrop_token, int(arg) if arg else cfg.collection_id))
+        return ("raindrop", cls(
+            cfg.raindrop_token, int(arg) if arg else cfg.collection_id,
+            unhoarded_tag=cfg.unhoarded_tag, unhoarded_collection_id=cfg.unhoarded_collection_id,
+        ))
     if stype == "chrome":
         return ("chrome", cls(profile_dir=arg or None))
     if stype == "safari":

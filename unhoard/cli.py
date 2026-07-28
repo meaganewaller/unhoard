@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 from .config import load_config, write_default_config, CONFIG_PATH
 from .digest import build_digest
-from .sources import build_adapters
+from .sources import build_adapters, find_adapter_for_source
 from .state import StateStore
 
 
@@ -104,6 +104,16 @@ def cmd_mark(args) -> int:
             )
         store.mark_unhoarded(row["key"], note=args.note or "")
         print(f"Unhoarded: {row['title']}")
+
+        adapter = find_adapter_for_source(cfg, row["source"])
+        if adapter is None or not hasattr(adapter, "mark_unhoarded"):
+            print(f"  (no write-back support for source '{row['source']}' -- local state only)", file=sys.stderr)
+        else:
+            try:
+                adapter.mark_unhoarded(row["source_id"], note=args.note or None)
+                print(f"  also marked unhoarded in {row['source']}")
+            except Exception as e:  # noqa: BLE001 -- write-back is best-effort; local state already saved
+                print(f"  warning: couldn't write back to {row['source']}: {e}", file=sys.stderr)
     elif args.done:
         store.mark_done(row["key"], reason="marked done via CLI")
         print(f"Done: {row['title']}")

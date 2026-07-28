@@ -4,7 +4,7 @@ Turns your reading-list backlog (Raindrop, browser bookmarks, or any JSON export
 
 ## How It Works
 
-An item keeps showing up in the digest until you either run `mark ... --done`, or handle it in the source app itself (archive it, move it out of Raindrop's Unsorted, delete the bookmark). The next `sync` notices it's gone from the source and closes it out automatically. Nothing is ever deleted by this tool. It only reads.
+An item keeps showing up in the digest until you either run `mark ... --done`, or handle it in the source app itself (archive it, move it out of Raindrop's Unsorted, delete the bookmark). The next `sync` notices it's gone from the source and closes it out automatically. unhoard never deletes anything on its own -- but `mark <key> --unhoarded` can optionally write a small marker (a tag and/or collection move) back to a source that supports it, and only when you explicitly ask for it. See "What 'Unhoarded' Means" below.
 
 ## Install
 
@@ -73,10 +73,25 @@ unhoard sync                     # pull latest from all configured sources
 unhoard digest                   # write today's digest to ~/unhoard-digests/
 unhoard stats                    # quick counts
 unhoard mark <key> --done        # e.g., unhoard mark raindrop:123456 --done
+unhoard mark <key> --unhoarded --note "..."  # see "What 'Unhoarded' Means" below
 unhoard mark <key> --snoze 14    # hide for 2 weeks
 ```
 
 `digest` always writes both `digest-YYYY-MM-DD.md` and `latest.md` (same content) so cronjobs / scripts can always read a stable filename.
+
+## What "Unhoarded" Means
+
+`--done` just means "stop showing me this" -- you might have read it, ignored it, or decided you don't care. `--unhoarded` means something stronger: you actually synthesized and stored the information somewhere, and properly sourced/cited it back to the original. An old-web tutorial you folded into a retrospective page with a link back is unhoarded; one you skimmed and closed is just done.
+
+```bash
+unhoard mark raindrop:123456 --unhoarded --note "folded into the CSS-tricks retrospective page, linked back to original"
+```
+
+`--note` is where the "properly sourced" half lives -- record where/how you used it. Skipping it still works, but you'll get a warning: an unhoarded item without a note is only half-unhoarded.
+
+For sources that support it (currently just Raindrop), marking an item unhoarded also writes a tag back to the item in the source app itself -- `unhoarded` by default, configurable via `unhoarded_tag` -- and, if you've set `unhoarded_collection_id`, moves it to that collection too. Existing tags are preserved, not overwritten. Sources without write-back support (Chrome, Safari, generic JSON) still get the local `--unhoarded` state; you'll just see a note that there's no write-back for that source.
+
+Write-back is best-effort: if it fails (network, auth, whatever) or isn't supported, the local mark still succeeds -- local state is unhoard's source of truth, the source-app marker is enrichment on top.
 
 ## Cronjobs
 
@@ -119,3 +134,5 @@ All of these can be set as environment variables (`UNHOARD_*`) or in `config.tom
 | `model` | `claude-sonnet-5` | Model used for stale-item summaries |
 | `output_dir` | `~/unhoard-digests/` | Where digest files land |
 | `context` | _(empty)_ | Free-text notes on your projects/interests, given to the summarizer |
+| `unhoarded_tag` | `unhoarded` | Tag written to a Raindrop item on `mark --unhoarded` |
+| `unhoarded_collection_id` | _(unset)_ | If set, also moves the item to this Raindrop collection on `mark --unhoarded` |

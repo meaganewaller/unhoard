@@ -1,7 +1,7 @@
 """Raindrop.io adapter -- pulls a collection via the REST API."""
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Iterator, Optional
 
 import requests
 
@@ -18,7 +18,13 @@ class RaindropError(RuntimeError):
 class RaindropAdapter:
     name = "raindrop"
 
-    def __init__(self, token: str, collection_id: int = 0):
+    def __init__(
+        self,
+        token: str,
+        collection_id: int = 0,
+        unhoarded_tag: str = "unhoarded",
+        unhoarded_collection_id: Optional[int] = None,
+    ):
         if not token:
             raise RaindropError(
                 "No Raindrop token configured. Set RAINDROP_TOKEN (get one at "
@@ -26,6 +32,8 @@ class RaindropAdapter:
                 "'Create test token')."
             )
         self.collection_id = collection_id
+        self.unhoarded_tag = unhoarded_tag
+        self.unhoarded_collection_id = unhoarded_collection_id
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {token}"})
 
@@ -63,4 +71,24 @@ class RaindropAdapter:
             if len(raw_items) < PAGE_SIZE:
                 break
             page += 1
+
+    def mark_unhoarded(self, source_id: str, note: Optional[str] = None) -> None:
+        """Adds self.unhoarded_tag to the raindrop's existing tags (merged, not
+        replaced -- Raindrop's PUT overwrites whatever tag list you send) and
+        moves it to self.unhoarded_collection_id if one is configured. Raises
+        on failure; the caller decides how to treat that (best-effort enrichment,
+        not a hard requirement)."""
+        get_resp = self.session.get(f"{API_BASE}/raindrop/{source_id}", timeout=15)
+        get_resp.raise_for_status()
+        current_tags = set(get_resp.json().get("item", {}).get("tags", []) or [])
+        current_tags.add(self.unhoarded_tag)
+
+        body = {"tags": sorted(current_tags)}
+        if note:
+            body["note"] = note
+        if self.unhoarded_collection_id is not None:
+            body["collection"] = {"$id": self.unhoarded_collection_id}
+
+        put_resp = self.session.put(f"{API_BASE}/raindrop/{source_id}", json=body, timeout=15)
+        put_resp.raise_for_status()
 
