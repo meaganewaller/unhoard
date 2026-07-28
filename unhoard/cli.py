@@ -261,7 +261,7 @@ def cmd_stats(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="unhoard", description="Daily triage digest for your reading backlog.")
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command")
 
     init_p = sub.add_parser("init", help=f"Write a starter config to {CONFIG_PATH}")
     init_p.add_argument("--force", action="store_true", help="Overwrite existing config")
@@ -312,6 +312,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help()
+        return 1
     return args.func(args)
 
 
