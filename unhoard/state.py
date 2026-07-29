@@ -12,7 +12,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 from .schema import Item
 
@@ -51,7 +51,9 @@ CREATE TABLE IF NOT EXISTS items (
 
 
 class StateStore:
-    def __init__(self, db_path: Path):
+    conn: sqlite3.Connection
+
+    def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
@@ -59,12 +61,12 @@ class StateStore:
         self._migrate()
         self.conn.commit()
 
-    _MIGRATION_COLUMNS = [
+    _MIGRATION_COLUMNS: list[str] = [
         "context_hash", "note", "suggested_tags", "suggested_collection",
         "tags_applied_at", "collection_applied_at", "summary_applied_at", "synthesized_at",
     ]
 
-    def _migrate(self):
+    def _migrate(self) -> None:
         """CREATE TABLE IF NOT EXISTS won't add columns to a table that already
         exists from an earlier version -- patch those in here."""
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
@@ -73,7 +75,7 @@ class StateStore:
                 self.conn.execute(f"ALTER TABLE items ADD COLUMN {name} TEXT")
 
     @contextmanager
-    def _cursor(self):
+    def _cursor(self) -> Iterator[sqlite3.Cursor]:
         cur = self.conn.cursor()
         try:
             yield cur
@@ -112,7 +114,7 @@ class StateStore:
                     )
         return seen_keys
 
-    def mark_missing_as_done(self, source: str, seen_keys: set[str], reason: str = "removed from source"):
+    def mark_missing_as_done(self, source: str, seen_keys: set[str], reason: str = "removed from source") -> int:
         """Anything from this source that's active locally but wasn't in this sync's
         results has been handled outside the tool (moved/archived/deleted) -- close it out."""
         with self._cursor() as cur:
@@ -134,11 +136,11 @@ class StateStore:
         ).fetchall()
         return rows
 
-    def mark_done(self, key: str, reason: str = "marked done"):
+    def mark_done(self, key: str, reason: str = "marked done") -> None:
         with self._cursor() as cur:
             cur.execute("UPDATE items SET status='done', status_reason=? WHERE key=?", (reason, key))
 
-    def mark_unhoarded(self, key: str, note: str = "", reason: str = "unhoarded via CLI"):
+    def mark_unhoarded(self, key: str, note: str = "", reason: str = "unhoarded via CLI") -> None:
         """Distinct from mark_done: means the information was actually synthesized,
         stored, and properly sourced elsewhere -- not just closed out or ignored."""
         with self._cursor() as cur:
@@ -147,7 +149,7 @@ class StateStore:
                 (reason, note, key),
             )
 
-    def mark_applied(self, key: str, tags: bool = False, collection: bool = False, summary: bool = False):
+    def mark_applied(self, key: str, tags: bool = False, collection: bool = False, summary: bool = False) -> None:
         """Records that `unhoard apply` successfully pushed a given aspect
         (tags/collection/summary) so the digest stops nagging about suggestions
         that have already been applied. Does not touch `status` -- an item can
@@ -169,7 +171,7 @@ class StateStore:
         with self._cursor() as cur:
             cur.execute(f"UPDATE items SET {', '.join(fields)} WHERE key=?", values)
 
-    def mark_synthesized(self, key: str):
+    def mark_synthesized(self, key: str) -> None:
         """Records that `unhoard synthesize` wrote a standalone note for this item.
         Informational only -- the actual overwrite-safety check is a real
         file-existence check on disk, not this flag, so it stays correct even if
@@ -180,13 +182,13 @@ class StateStore:
                 (datetime.now(timezone.utc).isoformat(), key),
             )
 
-    def mark_snoozed(self, key: str, until: date):
+    def mark_snoozed(self, key: str, until: date) -> None:
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE items SET status='snoozed', snooze_until=? WHERE key=?", (until.isoformat(), key)
             )
 
-    def record_shown(self, keys: Iterable[str]):
+    def record_shown(self, keys: Iterable[str]) -> None:
         today = date.today().isoformat()
         with self._cursor() as cur:
             for key in keys:
@@ -204,7 +206,7 @@ class StateStore:
         context_hash: str,
         suggested_tags: str = "",
         suggested_collection: str = "",
-    ):
+    ) -> None:
         with self._cursor() as cur:
             cur.execute(
                 """UPDATE items SET summary=?, summary_model=?, summary_date=?,
@@ -215,7 +217,7 @@ class StateStore:
                 ),
             )
 
-    def stats(self) -> dict:
+    def stats(self) -> dict[str, dict[str, int]]:
         rows = self.conn.execute("SELECT status, COUNT(*) c FROM items GROUP BY status").fetchall()
         by_status = {r["status"]: r["c"] for r in rows}
         by_source = self.conn.execute(

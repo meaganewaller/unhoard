@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any, Optional
 
 
 @dataclass
@@ -22,7 +23,7 @@ class Item:
         return f"{self.source}:{self.source_id}"
 
     @staticmethod
-    def parse_dt(value, default=None) -> datetime:
+    def parse_dt(value: Any, default: Optional[datetime] = None) -> datetime:
         """Best-effort parse of a timestamp from very heterogeneous sources."""
         if value is None:
             return default or datetime.now(timezone.utc)

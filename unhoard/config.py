@@ -8,12 +8,14 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional, TypeVar, overload
 
 CONFIG_DIR = Path(os.environ.get("UNHOARD_HOME", Path.home() / ".config" / "unhoard"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 DEFAULT_STATE_DIR = Path(os.environ.get("UNHOARD_DATA", Path.home() / ".local" / "share" / "unhoard"))
 DEFAULT_OUTPUT_DIR = Path.home() / "unhoard-digests"
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -40,7 +42,7 @@ class Config:
         return bool(self.anthropic_api_key)
 
 
-def _load_toml_file() -> dict:
+def _load_toml_file() -> dict[str, Any]:
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "rb") as f:
             return tomllib.load(f)
@@ -51,7 +53,12 @@ def load_config() -> Config:
     file_cfg = _load_toml_file()
     cfg = Config()
 
-    def pick(key: str, env_name: str, cast=str):
+    @overload
+    def pick(key: str, env_name: str) -> str: ...
+    @overload
+    def pick(key: str, env_name: str, cast: Callable[[Any], _T]) -> _T: ...
+
+    def pick(key: str, env_name: str, cast: Callable[[Any], Any] = str) -> Any:
         env_val = os.environ.get(env_name)
         if env_val is not None:
             return cast(env_val)
