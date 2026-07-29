@@ -17,10 +17,18 @@ brew install unhoard
 
 ## Dev / Local Install Instead
 
-```
-git repo clone git@github.com:meaganewaller/unhoard
+```bash
+git clone git@github.com:meaganewaller/unhoard
 cd unhoard
-pip install -e
+uv sync
+```
+
+### Type Checking
+
+Type hints are checked with [ty](https://github.com/astral-sh/ty):
+
+```bash
+uv run ty check
 ```
 
 ## Setup
