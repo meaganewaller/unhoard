@@ -1,7 +1,7 @@
 """Base interface every source adapter implements."""
 from __future__ import annotations
 
-from typing import Iterable, Iterator, Optional, Protocol
+from typing import Any, Iterable, Iterator, Optional, Protocol, runtime_checkable
 
 from ..schema import Item
 
@@ -14,14 +14,14 @@ class Adapter(Protocol):
         ...
 
 
+@runtime_checkable
 class WritebackAdapter(Adapter, Protocol):
     """An adapter that can reflect state back to its source: an 'unhoarded'
     marker, or arbitrary tag/collection/note updates.
 
     Not every adapter implements this (local file/export sources like chrome,
     safari, and generic_json have nothing to write back to) -- check with
-    hasattr(adapter, "mark_unhoarded") (or "apply_updates") rather than
-    assuming it's present.
+    isinstance(adapter, WritebackAdapter) rather than assuming it's present.
     """
 
     def mark_unhoarded(self, source_id: str, note: Optional[str] = None) -> None:
@@ -42,7 +42,7 @@ class WritebackAdapter(Adapter, Protocol):
         omitted to leave that aspect untouched."""
         ...
 
-    def list_collections(self) -> list:
+    def list_collections(self) -> list[dict[str, Any]]:
         """Returns [{'id': ..., 'title': str}, ...] for every collection this
         source has, used to ground suggestions and resolve names to ids."""
         ...

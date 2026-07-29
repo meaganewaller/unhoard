@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import tomllib
-from typing import Optional
+from typing import Any, Optional
 
 from .adapters import REGISTRY
+from .adapters.base import Adapter
 from .config import CONFIG_PATH, Config
 
 
-def load_source_configs() -> list[dict]:
+def load_source_configs() -> list[dict[str, Any]]:
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "rb") as f:
             data = tomllib.load(f)
@@ -17,7 +18,7 @@ def load_source_configs() -> list[dict]:
     return []
 
 
-def build_adapters(cfg: Config, cli_sources: Optional[list[str]] = None) -> list[tuple[str, object]]:
+def build_adapters(cfg: Config, cli_sources: Optional[list[str]] = None) -> list[tuple[str, Adapter]]:
     """Returns [(label, adapter_instance), ...].
 
     cli_sources, if given, overrides config.toml entirely with simple 'type' or
@@ -28,7 +29,7 @@ def build_adapters(cfg: Config, cli_sources: Optional[list[str]] = None) -> list
 
     configured = load_source_configs()
     if configured:
-        adapters = []
+        adapters: list[tuple[str, Adapter]] = []
         for entry in configured:
             entry = dict(entry)
             stype = entry.pop("type", None)
@@ -56,7 +57,7 @@ def build_adapters(cfg: Config, cli_sources: Optional[list[str]] = None) -> list
     return []
 
 
-def find_adapter_for_source(cfg: Config, source: str) -> Optional[object]:
+def find_adapter_for_source(cfg: Config, source: str) -> Optional[Adapter]:
     """Best-effort lookup of a configured adapter instance matching an item's
     stored `source` (e.g. 'raindrop', or 'json:pocket'). Used for optional
     write-back on `mark --unhoarded` -- returns None if nothing matches or
@@ -72,7 +73,7 @@ def find_adapter_for_source(cfg: Config, source: str) -> Optional[object]:
     return None
 
 
-def _build_from_spec(spec: str, cfg: Config) -> tuple[str, object]:
+def _build_from_spec(spec: str, cfg: Config) -> tuple[str, Adapter]:
     stype, _, arg = spec.partition(":")
     cls = REGISTRY.get(stype)
     if not cls:

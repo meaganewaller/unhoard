@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date, datetime, timezone
+from typing import Optional
 
 from rich.markup import escape
 from rich.progress import track
 
+from .adapters.base import WritebackAdapter
 from .config import Config
 from .sources import find_adapter_for_source
 from .state import StateStore
@@ -25,7 +28,7 @@ def build_digest(cfg: Config, store: StateStore) -> tuple[str, str]:
     """Returns (markdown_text, output_filename)."""
     rows = list(store.active_items())
 
-    buckets = {"new": [], "aging": [], "stale": []}
+    buckets: dict[str, list[tuple[int, sqlite3.Row]]] = {"new": [], "aging": [], "stale": []}
     for row in rows:
         age = _age_days(row["created_at"])
         if age <= cfg.aging_days:
@@ -44,8 +47,8 @@ def build_digest(cfg: Config, store: StateStore) -> tuple[str, str]:
         "stale": buckets["stale"][: cfg.max_stale],
     }
 
-    shown_keys = []
-    lines = []
+    shown_keys: list[str] = []
+    lines: list[str] = []
     today = date.today()
     total_active = len(rows)
     lines.append(f"# Reading backlog digest -- {today.isoformat()}\n")
@@ -95,7 +98,7 @@ def build_digest(cfg: Config, store: StateStore) -> tuple[str, str]:
     return markdown, filename
 
 
-def _tags_str(row) -> str:
+def _tags_str(row: sqlite3.Row) -> str:
     try:
         tags = json.loads(row["tags"] or "[]")
     except json.JSONDecodeError:
@@ -103,7 +106,7 @@ def _tags_str(row) -> str:
     return ", ".join(tags) if tags else ""
 
 
-def _render_metadata_item(row, age: int) -> str:
+def _render_metadata_item(row: sqlite3.Row, age: int) -> str:
     tags = _tags_str(row)
     tag_part = f" `{tags}`" if tags else ""
     lines = [f"- **[{row['title']}]({row['url']})** -- {age}d old, via `{row['source']}`{tag_part}"]
@@ -113,13 +116,13 @@ def _render_metadata_item(row, age: int) -> str:
     return "\n".join(lines)
 
 
-def _fetch_collection_names(cfg: Config) -> list:
+def _fetch_collection_names(cfg: Config) -> list[str]:
     """Best-effort fetch of real collection names to ground AI collection
     suggestions in -- returns [] if no write-back-capable adapter is
     configured or the call fails, in which case the summarizer just won't
     suggest a collection."""
     adapter = find_adapter_for_source(cfg, "raindrop")
-    if adapter is None or not hasattr(adapter, "list_collections"):
+    if adapter is None or not isinstance(adapter, WritebackAdapter):
         return []
     try:
         return [c["title"] for c in adapter.list_collections()]
@@ -128,7 +131,7 @@ def _fetch_collection_names(cfg: Config) -> list:
         return []
 
 
-def _load_suggested_tags(raw) -> list:
+def _load_suggested_tags(raw: Optional[str]) -> list[str]:
     if not raw:
         return []
     try:
@@ -137,7 +140,7 @@ def _load_suggested_tags(raw) -> list:
         return []
 
 
-def _suggestion_line(row, tags: list, collection: str) -> str:
+def _suggestion_line(row: sqlite3.Row, tags: list[str], collection: str) -> str:
     """Only mentions suggestions that haven't already been pushed via
     `unhoard apply` -- once applied, nagging about it again is just noise."""
     parts = []
@@ -150,7 +153,7 @@ def _suggestion_line(row, tags: list, collection: str) -> str:
     return f"*suggested -- {' | '.join(parts)} (apply with `unhoard apply <key>`)*"
 
 
-def _needs_fresh_summary(cfg: Config, row) -> bool:
+def _needs_fresh_summary(cfg: Config, row: sqlite3.Row) -> bool:
     """A cached summary was generated under a different `context` setting -- re-run
     it so newly-added preservation rules actually apply to items already summarized."""
     summary_text = row["summary"] or ""
@@ -160,7 +163,9 @@ def _needs_fresh_summary(cfg: Config, row) -> bool:
     return (row["context_hash"] or "") != current_ctx_hash
 
 
-def _render_stale_item(cfg: Config, store: StateStore, row, age: int, collection_names: list) -> str:
+def _render_stale_item(
+    cfg: Config, store: StateStore, row: sqlite3.Row, age: int, collection_names: list[str]
+) -> str:
     summary_text = row["summary"] or ""
     current_ctx_hash = compute_context_hash(cfg.context)
     need_summary = _needs_fresh_summary(cfg, row)

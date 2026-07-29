@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 import requests
 
@@ -28,7 +28,7 @@ _GUESSES = {
 }
 
 
-def _get_nested(data, dotted_path: str):
+def _get_nested(data: Any, dotted_path: str) -> Any:
     node = data
     for part in dotted_path.split("."):
         if isinstance(node, dict):
@@ -38,7 +38,7 @@ def _get_nested(data, dotted_path: str):
     return node
 
 
-def _guess_field(record: dict, field: str, override: Optional[str]):
+def _guess_field(record: Any, field: str, override: Optional[str]) -> Any:
     if override:
         return record.get(override)
     for candidate in _GUESSES.get(field, []):
@@ -53,17 +53,17 @@ class GenericJSONAdapter:
     def __init__(
         self,
         source_path: str,
-        field_map: Optional[dict] = None,
+        field_map: Optional[dict[str, str]] = None,
         records_path: Optional[str] = None,
         source_name: Optional[str] = None,
-    ):
+    ) -> None:
         self.source_path = source_path
-        self.field_map = field_map or {}
+        self.field_map: dict[str, str] = field_map or {}
         self.records_path = records_path
         label = source_name or Path(source_path).stem or "json"
         self.source_label = f"json:{label}"
 
-    def _load_raw(self):
+    def _load_raw(self) -> Any:
         if self.source_path.startswith("http://") or self.source_path.startswith("https://"):
             resp = requests.get(self.source_path, timeout=30)
             resp.raise_for_status()

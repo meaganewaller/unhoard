@@ -8,7 +8,7 @@ import plistlib
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 from ..schema import Item
 
@@ -18,10 +18,10 @@ DEFAULT_PATH = Path.home() / "Library" / "Safari" / "Bookmarks.plist"
 class SafariAdapter:
     name = "safari"
 
-    def __init__(self, plist_path: Optional[str] = None):
-        self.plist_path = Path(plist_path).expanduser() if plist_path else DEFAULT_PATH
+    def __init__(self, plist_path: Optional[str] = None) -> None:
+        self.plist_path: Path = Path(plist_path).expanduser() if plist_path else DEFAULT_PATH
 
-    def _walk(self, node: dict, folder_path: list[str]) -> Iterator[Item]:
+    def _walk(self, node: dict[str, Any], folder_path: list[str]) -> Iterator[Item]:
         node_type = node.get("WebBookmarkType")
         title = node.get("Title") or (node.get("URIDictionary") or {}).get("title", "")
 

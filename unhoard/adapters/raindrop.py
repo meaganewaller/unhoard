@@ -1,7 +1,7 @@
 """Raindrop.io adapter -- pulls a collection via the REST API."""
 from __future__ import annotations
 
-from typing import Iterable, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 import requests
 
@@ -24,7 +24,7 @@ class RaindropAdapter:
         collection_id: int = 0,
         unhoarded_tag: str = "unhoarded",
         unhoarded_collection_id: Optional[int] = None,
-    ):
+    ) -> None:
         if not token:
             raise RaindropError(
                 "No Raindrop token configured. Set RAINDROP_TOKEN (get one at "
@@ -37,7 +37,7 @@ class RaindropAdapter:
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {token}"})
 
-    def whoami(self) -> dict:
+    def whoami(self) -> dict[str, Any]:
         resp = self.session.get(f"{API_BASE}/user", timeout=15)
         resp.raise_for_status()
         return resp.json()
@@ -94,7 +94,7 @@ class RaindropAdapter:
         so whichever caller writes last wins. Any of the three can be omitted
         to leave that aspect untouched. Raises on failure; the caller decides
         how to treat that (best-effort enrichment, not a hard requirement)."""
-        body: dict = {}
+        body: dict[str, Any] = {}
         if tags:
             get_resp = self.session.get(f"{API_BASE}/raindrop/{source_id}", timeout=15)
             get_resp.raise_for_status()
@@ -111,12 +111,12 @@ class RaindropAdapter:
         put_resp = self.session.put(f"{API_BASE}/raindrop/{source_id}", json=body, timeout=15)
         put_resp.raise_for_status()
 
-    def list_collections(self) -> list:
+    def list_collections(self) -> list[dict[str, Any]]:
         """Returns [{'id': int, 'title': str}, ...] for every collection in the
         account (top-level and nested children), used to ground AI suggestions
         in real collections and to resolve a suggested name back to the id
         Raindrop's write API needs."""
-        collections = []
+        collections: list[dict[str, Any]] = []
         for endpoint in ("collections", "collections/childrens"):
             resp = self.session.get(f"{API_BASE}/{endpoint}", timeout=15)
             resp.raise_for_status()

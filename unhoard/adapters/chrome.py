@@ -11,7 +11,7 @@ import json
 import platform
 import sys
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 from ..schema import Item
 
@@ -38,10 +38,12 @@ def _default_profile_dir() -> Optional[Path]:
 class ChromeAdapter:
     name = "chrome"
 
-    def __init__(self, profile_dir: Optional[str] = None):
-        self.profile_dir = Path(profile_dir).expanduser() if profile_dir else _default_profile_dir()
+    def __init__(self, profile_dir: Optional[str] = None) -> None:
+        self.profile_dir: Optional[Path] = (
+            Path(profile_dir).expanduser() if profile_dir else _default_profile_dir()
+        )
 
-    def _walk_bookmarks(self, node: dict, folder_path: list[str]) -> Iterator[Item]:
+    def _walk_bookmarks(self, node: dict[str, Any], folder_path: list[str]) -> Iterator[Item]:
         node_type = node.get("type")
         if node_type == "folder":
             name = node.get("name", "")
@@ -60,6 +62,7 @@ class ChromeAdapter:
             )
 
     def _fetch_bookmarks_file(self) -> Iterator[Item]:
+        assert self.profile_dir is not None, "only called after fetch()'s profile_dir guard"
         bm_path = self.profile_dir / "Bookmarks"
         if not bm_path.exists():
             return
@@ -75,6 +78,7 @@ class ChromeAdapter:
     def _fetch_reading_list_file(self) -> Iterator[Item]:
         # Chrome's on-disk format for the reading list has varied across versions;
         # this is best-effort and silently yields nothing if the shape doesn't match.
+        assert self.profile_dir is not None, "only called after fetch()'s profile_dir guard"
         rl_path = self.profile_dir / "Reading List"
         if not rl_path.exists():
             return
@@ -112,7 +116,7 @@ class ChromeAdapter:
         yield from self._fetch_reading_list_file()
 
 
-def _safe_int(value):
+def _safe_int(value: Any) -> Optional[int]:
     try:
         return int(value)
     except (TypeError, ValueError):

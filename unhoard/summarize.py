@@ -5,14 +5,15 @@ from __future__ import annotations
 
 import hashlib
 import sys
-from typing import Optional
+from types import ModuleType
+from typing import Optional, TypedDict
 
 import requests
 
 try:
     import trafilatura
 except ImportError:  # pragma: no cover
-    trafilatura = None
+    trafilatura: Optional[ModuleType] = None
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
@@ -32,6 +33,16 @@ Article text (may be truncated):
 """
 
 
+class SummaryResult(TypedDict, total=False):
+    """All fields are optional: summarize() returns {} when no summary could
+    be produced at all, and callers already read every field via .get()."""
+    summary: str
+    action: str
+    tags: list[str]
+    collection: Optional[str]
+    raw: str
+
+
 def _context_block(context: str) -> str:
     if not context:
         return ""
@@ -41,7 +52,7 @@ def _context_block(context: str) -> str:
     )
 
 
-def _collections_block(collection_names: Optional[list]) -> str:
+def _collections_block(collection_names: Optional[list[str]]) -> str:
     if not collection_names:
         return "\nThere are no existing collections to choose from -- always answer Collection: none.\n"
     names = "\n".join(f"- {name}" for name in collection_names)
@@ -51,11 +62,11 @@ def _collections_block(collection_names: Optional[list]) -> str:
     )
 
 
-def parse_summary_response(text: str) -> dict:
+def parse_summary_response(text: str) -> SummaryResult:
     """Best-effort line-based parse of the AI response into structured fields.
     Never raises -- an unrecognized or missing line just leaves that field at
     its empty default, callers should tolerate a partially-parsed response."""
-    result = {"summary": "", "action": "", "tags": [], "collection": None}
+    result: SummaryResult = {"summary": "", "action": "", "tags": [], "collection": None}
     for line in text.splitlines():
         line = line.strip()
         if not line or ":" not in line:
@@ -104,9 +115,9 @@ def summarize(
     api_key: str,
     model: str,
     context: str = "",
-    collection_names: Optional[list] = None,
+    collection_names: Optional[list[str]] = None,
     max_tokens: int = 300,
-) -> tuple[dict, str]:
+) -> tuple[SummaryResult, str]:
     """Returns (parsed, content_hash). parsed is {} if a summary couldn't be produced --
     caller should fall back to the raw excerpt in that case. parsed['raw'] holds the full
     response text for display; 'tags'/'collection' are pulled out for the apply-on-demand
