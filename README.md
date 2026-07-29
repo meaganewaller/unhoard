@@ -31,6 +31,12 @@ Type hints are checked with [ty](https://github.com/astral-sh/ty):
 uv run ty check
 ```
 
+### Tests
+
+```bash
+uv run pytest
+```
+
 ## Setup
 
 ```bash

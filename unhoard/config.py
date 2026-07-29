@@ -24,7 +24,7 @@ class Config:
     anthropic_api_key: str = ""
     collection_id: int = 0            # 0 = Unsorted (Raindrop's default inbox), -1 = All
     state_db_path: Path = field(default_factory=lambda: DEFAULT_STATE_DIR / "state.db")
-    output_dir: Path = DEFAULT_OUTPUT_DIR
+    output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     aging_days: int = 7               # items newer than this = "New"
     stale_days: int = 30              # items older than this = "Stale" (get AI summaries)
     max_new: int = 6

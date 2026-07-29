@@ -23,9 +23,14 @@ include = ["unhoard*"]
 
 [dependency-groups]
 dev = [
+    "pytest>=9.1.1",
+    "responses>=0.26.2",
     "ty>=0.0.64",
 ]
 
 [tool.ty.environment]
 python-version = "3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
