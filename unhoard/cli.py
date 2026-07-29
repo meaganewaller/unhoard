@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 import sys
 from datetime import date, timedelta
+from typing import Optional
 
 import questionary
 from rich.markdown import Markdown
@@ -12,6 +14,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from .adapters.base import WritebackAdapter
 from .config import load_config, write_default_config, CONFIG_PATH
 from .digest import build_digest
 from .sources import build_adapters, find_adapter_for_source
@@ -29,7 +32,7 @@ def _is_interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def _find_single_item(store: StateStore, key: str):
+def _find_single_item(store: StateStore, key: str) -> Optional[sqlite3.Row]:
     """Looks up exactly one item by key or key fragment. On an ambiguous match,
     offers an interactive picker in a real terminal; scripted/piped/cron usage
     (no tty) keeps the old behavior of printing the list and returning None --
@@ -53,7 +56,7 @@ def _find_single_item(store: StateStore, key: str):
     return matches[0]
 
 
-def cmd_init(args) -> int:
+def cmd_init(args: argparse.Namespace) -> int:
     path = write_default_config(force=args.force)
     print_success(f"Config written to {escape(str(path))}")
 
@@ -81,7 +84,7 @@ def cmd_init(args) -> int:
     return 0
 
 
-def cmd_sync(args) -> int:
+def cmd_sync(args: argparse.Namespace) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
     try:
@@ -118,7 +121,7 @@ def cmd_sync(args) -> int:
     return 0
 
 
-def cmd_digest(args) -> int:
+def cmd_digest(args: argparse.Namespace) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
     markdown, filename = build_digest(cfg, store)
@@ -132,7 +135,7 @@ def cmd_digest(args) -> int:
     return 0
 
 
-def cmd_mark(args) -> int:
+def cmd_mark(args: argparse.Namespace) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
     row = _find_single_item(store, args.key)
@@ -149,7 +152,7 @@ def cmd_mark(args) -> int:
         print_success(f"Unhoarded: {escape(row['title'])}")
 
         adapter = find_adapter_for_source(cfg, row["source"])
-        if adapter is None or not hasattr(adapter, "mark_unhoarded"):
+        if adapter is None or not isinstance(adapter, WritebackAdapter):
             print_warning(f"no write-back support for source '{escape(row['source'])}' -- local state only")
         else:
             try:
@@ -170,7 +173,7 @@ def cmd_mark(args) -> int:
     return 0
 
 
-def cmd_apply(args) -> int:
+def cmd_apply(args: argparse.Namespace) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
     row = _find_single_item(store, args.key)
@@ -185,11 +188,11 @@ def cmd_apply(args) -> int:
         return 1
 
     adapter = find_adapter_for_source(cfg, row["source"])
-    if adapter is None or not hasattr(adapter, "apply_updates"):
+    if adapter is None or not isinstance(adapter, WritebackAdapter):
         print_error(f"no write-back support for source '{escape(row['source'])}' -- nothing to apply.")
         return 1
 
-    tags = None
+    tags: Optional[list[str]] = None
     if want_tags:
         try:
             suggested_tags = json.loads(row["suggested_tags"] or "[]")
@@ -200,8 +203,8 @@ def cmd_apply(args) -> int:
         else:
             print_warning("no suggested tags for this item -- run `unhoard digest` first.")
 
-    collection_id = None
-    collection_title = None
+    collection_id: Optional[int] = None
+    collection_title: Optional[str] = None
     if want_collection:
         suggested_collection = row["suggested_collection"] or ""
         if not suggested_collection:
@@ -234,10 +237,11 @@ def cmd_apply(args) -> int:
 
     store.mark_applied(row["key"], tags=tags is not None, collection=collection_id is not None, summary=note is not None)
 
-    applied = []
+    applied: list[str] = []
     if tags is not None:
         applied.append(f"tags ({escape(', '.join(tags))})")
     if collection_id is not None:
+        assert collection_title is not None, "set together with collection_id above"
         applied.append(f"collection ({escape(collection_title)})")
     if note is not None:
         applied.append("summary as note")
@@ -245,7 +249,7 @@ def cmd_apply(args) -> int:
     return 0
 
 
-def cmd_synthesize(args) -> int:
+def cmd_synthesize(args: argparse.Namespace) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
     row = _find_single_item(store, args.key)
@@ -292,7 +296,7 @@ def cmd_synthesize(args) -> int:
     return 0
 
 
-def cmd_stats(args) -> int:
+def cmd_stats(args: argparse.Namespace) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
     s = store.stats()
@@ -370,7 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv=None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
