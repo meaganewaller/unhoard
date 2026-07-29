@@ -2,7 +2,10 @@
 (CONFIG_DIR, CONFIG_PATH, DEFAULT_STATE_DIR, DEFAULT_OUTPUT_DIR) once at
 import time from the environment, so setting UNHOARD_HOME/UNHOARD_DATA in a
 test doesn't retroactively change them -- isolated_paths patches the module
-attributes directly instead."""
+attributes directly instead. sources.py also does `from .config import
+CONFIG_PATH`, which binds its own copy of the name at import time -- patching
+unhoard.config.CONFIG_PATH alone doesn't reach unhoard.sources.CONFIG_PATH,
+so both must be patched."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,6 +15,7 @@ from typing import Any, Callable
 import pytest
 
 from unhoard import config as config_module
+from unhoard import sources as sources_module
 from unhoard.schema import Item
 from unhoard.state import StateStore
 
@@ -40,6 +44,7 @@ def isolated_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNam
     monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
     monkeypatch.setattr(config_module, "DEFAULT_STATE_DIR", state_dir)
     monkeypatch.setattr(config_module, "DEFAULT_OUTPUT_DIR", output_dir)
+    monkeypatch.setattr(sources_module, "CONFIG_PATH", config_path)
     for env_var in _ENV_VARS_TO_CLEAR:
         monkeypatch.delenv(env_var, raising=False)
 
