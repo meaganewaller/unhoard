@@ -410,7 +410,9 @@ class TestApply:
         exit_code = cli_module.main(["apply", item.key, "--collection"])
 
         assert exit_code == 0
-        body = json.loads(responses.calls[-1].request.body)
+        request_body = responses.calls[-1].request.body
+        assert isinstance(request_body, (str, bytes))
+        body = json.loads(request_body)
         assert body == {"collection": {"$id": 5}}
 
     @responses.activate
@@ -445,7 +447,9 @@ class TestApply:
         exit_code = cli_module.main(["apply", item.key, "--summary"])
 
         assert exit_code == 0
-        body = json.loads(responses.calls[-1].request.body)
+        request_body = responses.calls[-1].request.body
+        assert isinstance(request_body, (str, bytes))
+        body = json.loads(request_body)
         assert body == {"note": "a cached summary"}
 
     @responses.activate
@@ -578,7 +582,9 @@ class TestApplyAll:
         exit_code = cli_module.main(["apply-all", "--all"])
 
         assert exit_code == 0
-        body = json.loads(responses.calls[-1].request.body)
+        request_body = responses.calls[-1].request.body
+        assert isinstance(request_body, (str, bytes))
+        body = json.loads(request_body)
         assert body["tags"] == ["ai-tag"]
         assert body["collection"] == {"$id": 5}
         assert body["note"] == "Fake summary **Action:** Read"
