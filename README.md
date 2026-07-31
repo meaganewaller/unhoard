@@ -90,10 +90,13 @@ unhoard mark <key> --done        # e.g., unhoard mark raindrop:123456 --done
 unhoard mark <key> --unhoarded --note "..."  # see "What 'Unhoarded' Means" below
 unhoard mark <key> --snoze 14    # hide for 2 weeks
 unhoard apply <key> --all        # push suggested tags/collection + AI summary to the source
+unhoard apply-all --all --limit 10  # same, batched: oldest-first, generates suggestions if missing, up to N items
 unhoard synthesize <key>         # pull the full article text into a standalone note to work from
 ```
 
 `digest` always writes both `digest-YYYY-MM-DD.md` and `latest.md` (same content) so cronjobs / scripts can always read a stable filename.
+
+`apply-all` is the on-demand, batch version of `apply`: instead of picking one key, it walks up to `--limit` active items (oldest first), generates an AI summary/tags/collection for any that don't have one cached yet (the same step the digest's stale bucket does), and pushes whichever of `--tags`/`--collection`/`--summary` (or `--all`) aren't already applied to a write-back-capable source. Items with nothing left to do, or with no write-back support at all, are skipped without counting against the limit.
 
 `synthesize` writes to `<output_dir>/synthesized/<slug>.md` -- frontmatter (title/url/source/tags) plus the AI summary (if cached) and the full fetched article text, real material to actually work from instead of just a link. It won't overwrite a note you've already started editing unless you pass `--force`. This is distinct from `--unhoarded`: synthesize just pulls the raw material in, `--unhoarded --note` is the separate, later step of recording that you actually used it somewhere.
 

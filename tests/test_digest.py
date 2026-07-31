@@ -14,7 +14,8 @@ from unhoard.digest import (
     _age_days,
     _fetch_collection_names,
     _load_suggested_tags,
-    _needs_fresh_summary,
+    needs_fresh_summary,
+    _processing_badge,
     _render_metadata_item,
     _suggestion_line,
     _tags_str,
@@ -153,17 +154,48 @@ class TestSuggestionLine:
 class TestNeedsFreshSummary:
     def test_no_cached_summary_needs_fresh(self, cfg: Config, state_store: StateStore) -> None:
         row = _insert_row(state_store, summary=None, context_hash=None)
-        assert _needs_fresh_summary(cfg, row) is True
+        assert needs_fresh_summary(cfg, row) is True
 
     def test_matching_context_hash_does_not_need_fresh(self, cfg: Config, state_store: StateStore) -> None:
         cfg.context = "some context"
         row = _insert_row(state_store, summary="cached", context_hash=context_hash(cfg.context))
-        assert _needs_fresh_summary(cfg, row) is False
+        assert needs_fresh_summary(cfg, row) is False
 
     def test_mismatched_context_hash_needs_fresh(self, cfg: Config, state_store: StateStore) -> None:
         cfg.context = "new context"
         row = _insert_row(state_store, summary="cached", context_hash=context_hash("old context"))
-        assert _needs_fresh_summary(cfg, row) is True
+        assert needs_fresh_summary(cfg, row) is True
+
+    def test_synthesized_item_never_needs_fresh_even_with_mismatched_context(
+        self, cfg: Config, state_store: StateStore
+    ) -> None:
+        cfg.context = "new context"
+        row = _insert_row(
+            state_store, summary=None, context_hash=None,
+            synthesized_at="2026-01-01T00:00:00+00:00",
+        )
+        assert needs_fresh_summary(cfg, row) is False
+
+
+class TestProcessingBadge:
+    def test_freshly_synced_item_has_no_badge(self, state_store: StateStore) -> None:
+        row = _insert_row(state_store)
+        assert _processing_badge(row) == ""
+
+    def test_acted_on_item_lists_which_actions_were_taken(self, state_store: StateStore) -> None:
+        row = _insert_row(state_store, summary="a summary", suggested_tags=json.dumps(["a"]))
+        badge = _processing_badge(row)
+        assert "summarized" in badge
+        assert "tagged" in badge
+        assert "collected" not in badge
+
+    def test_synthesized_item_shows_synthesized_badge_not_acted_on(self, state_store: StateStore) -> None:
+        row = _insert_row(
+            state_store, summary="a summary", suggested_tags=json.dumps(["a"]),
+            synthesized_at="2026-01-01T00:00:00+00:00",
+        )
+        assert "synthesized" in _processing_badge(row)
+        assert "tagged" not in _processing_badge(row)
 
 
 class TestFetchCollectionNames:
@@ -348,6 +380,66 @@ class TestBuildDigest:
         markdown, _ = build_digest(cfg, state_store)
 
         assert "already cached summary" in markdown
+        # Acted on and cache-fresh -- belongs under "Ready to finish", not "Stale backlog".
+        assert "## ✅ Ready to finish" in markdown
+        assert "## \U0001f578️ Stale backlog" not in markdown
+
+    def test_ready_items_are_not_capped_by_max_stale(
+        self, cfg: Config, state_store: StateStore, make_item: ItemFactory
+    ) -> None:
+        """The whole point of splitting ready-to-finish items out of the stale
+        bucket: max_stale bounds AI-analysis work, not how many already-done
+        items you can plow through in one sitting."""
+        cfg.max_stale = 2
+        cfg.context = "ctx"
+        items = [
+            make_item(source_id=str(i), title=f"Ready {i}", created_at=_days_ago(40 + i))
+            for i in range(4)
+        ]
+        state_store.upsert_items(items)
+        for item in items:
+            state_store.save_summary(item.key, f"summary for {item.key}", cfg.model, "h", context_hash(cfg.context))
+
+        markdown, _ = build_digest(cfg, state_store)
+
+        for item in items:
+            assert item.title in markdown
+
+    def test_max_stale_cap_prioritizes_items_needing_analysis_over_ready_ones(
+        self, cfg: Config, state_store: StateStore, make_item: ItemFactory
+    ) -> None:
+        cfg.max_stale = 1
+        cfg.anthropic_api_key = ""  # no real AI calls -- exercise the excerpt/placeholder fallback
+        cfg.context = "ctx"
+        ready_item = make_item(source_id="ready", title="Ready Item", created_at=_days_ago(50))
+        needs_item = make_item(source_id="needs", title="Needs Item", created_at=_days_ago(40))
+        state_store.upsert_items([ready_item, needs_item])
+        state_store.save_summary(ready_item.key, "cached", cfg.model, "h", context_hash(cfg.context))
+
+        markdown, _ = build_digest(cfg, state_store)
+
+        assert "Ready Item" in markdown
+        assert "Needs Item" in markdown
+
+    def test_synthesized_item_is_not_resummarized_even_with_stale_context(
+        self, cfg: Config, state_store: StateStore, make_item: ItemFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg.anthropic_api_key = "key"
+        cfg.context = "new context"
+        item = make_item(source_id="1", title="Synthesized Item", created_at=_days_ago(40))
+        state_store.upsert_items([item])
+        state_store.mark_synthesized(item.key)
+
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("ai_summarize should not run for an already-synthesized item")
+
+        monkeypatch.setattr(digest_module, "ai_summarize", _boom)
+
+        markdown, _ = build_digest(cfg, state_store)
+
+        assert "## ✅ Ready to finish" in markdown
+        assert "Synthesized Item" in markdown
+        assert "✨ synthesized" in markdown
 
     def test_suggestion_omitted_once_already_applied(
         self, cfg: Config, state_store: StateStore, make_item: ItemFactory

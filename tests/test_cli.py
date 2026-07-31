@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -11,12 +11,18 @@ import pytest
 import responses
 
 from unhoard import cli as cli_module
+from unhoard import digest as digest_module
 from unhoard.adapters.raindrop import API_BASE
 from unhoard.config import Config
 from unhoard.schema import Item
 from unhoard.state import StateStore
 
 ItemFactory = Callable[..., Item]
+
+
+def _days_ago(days: int) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -466,6 +472,151 @@ class TestApply:
         assert row["summary_applied_at"] is None
 
 
+class TestApplyAll:
+    def test_no_flags_errors(self, store: StateStore) -> None:
+        exit_code = cli_module.main(["apply-all"])
+
+        assert exit_code == 1
+
+    @responses.activate
+    def test_processes_multiple_items_oldest_first_up_to_limit(
+        self,
+        store: StateStore,
+        make_item: ItemFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("RAINDROP_TOKEN", "tok")
+        old = _seed(store, make_item, source="raindrop", source_id="1", title="Old", created_at=_days_ago(40))
+        mid = _seed(store, make_item, source="raindrop", source_id="2", title="Mid", created_at=_days_ago(20))
+        new = _seed(store, make_item, source="raindrop", source_id="3", title="New", created_at=_days_ago(5))
+        for key in (old.key, mid.key, new.key):
+            store.save_summary(key, "", "m", "", "", suggested_tags=json.dumps(["a"]))
+        responses.add(responses.GET, f"{API_BASE}/raindrop/1", json={"item": {"tags": []}}, status=200)
+        responses.add(responses.PUT, f"{API_BASE}/raindrop/1", json={}, status=200)
+        responses.add(responses.GET, f"{API_BASE}/raindrop/2", json={"item": {"tags": []}}, status=200)
+        responses.add(responses.PUT, f"{API_BASE}/raindrop/2", json={}, status=200)
+
+        exit_code = cli_module.main(["apply-all", "--tags", "--limit", "2"])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "Applied to 2 item(s)" in captured.out
+        rows = {r["key"]: r["tags_applied_at"] for r in store.conn.execute("SELECT key, tags_applied_at FROM items")}
+        assert rows[old.key] is not None
+        assert rows[mid.key] is not None
+        assert rows[new.key] is None  # beyond the limit -- never touched, no HTTP call registered for it either
+
+    @responses.activate
+    def test_item_with_nothing_left_to_apply_is_skipped_without_a_writeback_call(
+        self,
+        store: StateStore,
+        make_item: ItemFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("RAINDROP_TOKEN", "tok")
+        item = _seed(store, make_item, source="raindrop", source_id="1")
+        store.save_summary(item.key, "", "m", "", "", suggested_tags=json.dumps(["a"]))
+        store.mark_applied(item.key, tags=True)
+
+        exit_code = cli_module.main(["apply-all", "--tags"])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "Applied to 0 item(s); 1 skipped" in captured.out
+
+    @responses.activate
+    def test_source_without_writeback_is_skipped_and_does_not_count_against_limit(
+        self, store: StateStore, make_item: ItemFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("RAINDROP_TOKEN", "tok")
+        json_item = _seed(
+            store, make_item, source="json:export", source_id="j1", title="Json Item", created_at=_days_ago(40)
+        )
+        store.save_summary(json_item.key, "", "m", "", "", suggested_tags=json.dumps(["a"]))
+        rd_item = _seed(store, make_item, source="raindrop", source_id="1", title="RD Item", created_at=_days_ago(5))
+        store.save_summary(rd_item.key, "", "m", "", "", suggested_tags=json.dumps(["b"]))
+        responses.add(responses.GET, f"{API_BASE}/raindrop/1", json={"item": {"tags": []}}, status=200)
+        responses.add(responses.PUT, f"{API_BASE}/raindrop/1", json={}, status=200)
+
+        exit_code = cli_module.main(["apply-all", "--tags", "--limit", "1"])
+
+        assert exit_code == 0
+        row = store.conn.execute("SELECT tags_applied_at FROM items WHERE key=?", (rd_item.key,)).fetchone()
+        assert row["tags_applied_at"] is not None
+
+    @responses.activate
+    def test_generates_missing_suggestions_then_applies_all(
+        self, store: StateStore, make_item: ItemFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("RAINDROP_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+        item = _seed(store, make_item, source="raindrop", source_id="1", title="Needs AI")
+
+        def _fake_ai_summarize(
+            title: str, url: str, api_key: str, model: str, context: str,
+            collection_names: list[str], max_tokens: int,
+        ) -> tuple[dict[str, Any], str]:
+            return (
+                {
+                    "summary": "Fake summary", "action": "Read",
+                    "tags": ["ai-tag"], "collection": "Reading", "raw": "raw text",
+                },
+                "chash123",
+            )
+
+        monkeypatch.setattr(digest_module, "ai_summarize", _fake_ai_summarize)
+        responses.add(
+            responses.GET, f"{API_BASE}/collections",
+            json={"items": [{"_id": 5, "title": "Reading"}]}, status=200,
+        )
+        responses.add(responses.GET, f"{API_BASE}/collections/childrens", json={"items": []}, status=200)
+        responses.add(responses.GET, f"{API_BASE}/raindrop/1", json={"item": {"tags": []}}, status=200)
+        responses.add(responses.PUT, f"{API_BASE}/raindrop/1", json={}, status=200)
+
+        exit_code = cli_module.main(["apply-all", "--all"])
+
+        assert exit_code == 0
+        body = json.loads(responses.calls[-1].request.body)
+        assert body["tags"] == ["ai-tag"]
+        assert body["collection"] == {"$id": 5}
+        assert body["note"] == "Fake summary **Action:** Read"
+        row = store.conn.execute(
+            "SELECT suggested_tags, suggested_collection, summary FROM items WHERE key=?", (item.key,)
+        ).fetchone()
+        assert json.loads(row["suggested_tags"]) == ["ai-tag"]
+        assert row["suggested_collection"] == "Reading"
+        assert row["summary"] == "Fake summary **Action:** Read"
+
+    @responses.activate
+    def test_writeback_failure_is_reported_and_batch_continues(
+        self,
+        store: StateStore,
+        make_item: ItemFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("RAINDROP_TOKEN", "tok")
+        failing = _seed(store, make_item, source="raindrop", source_id="1", title="Failing", created_at=_days_ago(40))
+        store.save_summary(failing.key, "a cached summary", "m", "", "")
+        ok = _seed(store, make_item, source="raindrop", source_id="2", title="Ok", created_at=_days_ago(5))
+        store.save_summary(ok.key, "another summary", "m", "", "")
+        responses.add(responses.PUT, f"{API_BASE}/raindrop/1", json={}, status=500)
+        responses.add(responses.PUT, f"{API_BASE}/raindrop/2", json={}, status=200)
+
+        exit_code = cli_module.main(["apply-all", "--summary"])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "couldn't apply to Failing" in captured.err
+        assert "Applied to 1 item(s); 1 skipped" in captured.out
+        row = store.conn.execute(
+            "SELECT summary_applied_at FROM items WHERE key=?", (failing.key,)
+        ).fetchone()
+        assert row["summary_applied_at"] is None
+
+
 class TestSynthesize:
     def test_writes_note_with_frontmatter_and_body(
         self,
@@ -560,3 +711,5 @@ class TestStats:
         assert "active" in captured.out
         assert "done" in captured.out
         assert "raindrop" in captured.out
+        assert "By processing state" in captured.out
+        assert "synced" in captured.out

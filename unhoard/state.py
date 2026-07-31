@@ -50,6 +50,40 @@ CREATE TABLE IF NOT EXISTS items (
 """
 
 
+def acted_on_flags(row: sqlite3.Row) -> dict[str, bool]:
+    """Which of the three AI-driven actions unhoard has taken on this item.
+    Derived from columns that already exist for other reasons (suggested_tags,
+    summary, suggested_collection) rather than a separate flag, so it can't
+    drift out of sync with them. Reflects unhoard having *generated* a
+    suggestion, not the suggestion having been pushed back to the source via
+    `apply` -- Chrome/Safari/JSON items have no write-back path at all but can
+    still be tagged/summarized/collected in this sense."""
+    try:
+        suggested_tags = json.loads(row["suggested_tags"] or "[]")
+    except json.JSONDecodeError:
+        suggested_tags = []
+    return {
+        "tagged": bool(suggested_tags),
+        "summarized": bool(row["summary"]),
+        "collected": bool(row["suggested_collection"]),
+    }
+
+
+def processing_state(row: sqlite3.Row) -> str:
+    """How far unhoard's own pipeline has gotten with this item: synced ->
+    acted_on -> synthesized. Independent of `status` (active/done/snoozed/
+    unhoarded), which tracks the user's triage decision, not unhoard's
+    progress -- a `done` item can still be `synthesized`, and an `active` one
+    can already be `acted_on`. There's no 'unsynced' value here: an item only
+    gets a row (and therefore a processing_state) once `sync` has pulled it
+    in, so "unsynced" just means no row exists yet."""
+    if row["synthesized_at"]:
+        return "synthesized"
+    if any(acted_on_flags(row).values()):
+        return "acted_on"
+    return "synced"
+
+
 class StateStore:
     conn: sqlite3.Connection
 
@@ -223,9 +257,14 @@ class StateStore:
         by_source = self.conn.execute(
             "SELECT source, COUNT(*) c FROM items WHERE status='active' GROUP BY source"
         ).fetchall()
+        by_processing_state: dict[str, int] = {}
+        for row in self.conn.execute("SELECT synthesized_at, summary, suggested_tags, suggested_collection FROM items"):
+            state = processing_state(row)
+            by_processing_state[state] = by_processing_state.get(state, 0) + 1
         return {
             "by_status": by_status,
             "active_by_source": {r["source"]: r["c"] for r in by_source},
+            "by_processing_state": by_processing_state,
         }
 
     def find_by_prefix(self, key_prefix: str) -> list[sqlite3.Row]:

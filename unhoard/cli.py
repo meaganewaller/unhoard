@@ -16,7 +16,7 @@ from rich.table import Table
 
 from .adapters.base import WritebackAdapter
 from .config import load_config, write_default_config, CONFIG_PATH
-from .digest import build_digest
+from .digest import build_digest, ensure_ai_suggestions, needs_fresh_summary
 from .sources import build_adapters, find_adapter_for_source
 from .state import StateStore
 from .summarize import fetch_article_text
@@ -249,6 +249,101 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_apply_all(args: argparse.Namespace) -> int:
+    """Batch version of `apply`: chews through up to `--limit` active items
+    (oldest first), generating an AI summary/tags/collection for any that
+    don't have one yet -- exactly like the stale digest bucket does -- and
+    pushing whichever of tags/collection/summary are requested and not
+    already applied. Unlike `apply`, this never touches a key: it picks its
+    own targets, which is the point -- it's for chewing through backlog
+    on demand instead of one `apply <key>` at a time."""
+    cfg = load_config()
+    store = StateStore(cfg.state_db_path)
+
+    want_tags = args.all or args.tags
+    want_collection = args.all or args.collection
+    want_summary = args.all or args.summary
+    if not (want_tags or want_collection or want_summary):
+        print_error("specify --tags, --collection, --summary, or --all")
+        return 1
+
+    candidates = sorted(store.active_items(), key=lambda r: r["created_at"])
+    collections_cache: dict[str, list[dict]] = {}
+
+    applied_count = 0
+    skipped_count = 0
+    for row in candidates:
+        if applied_count >= args.limit:
+            break
+
+        needs_tags = want_tags and not row["tags_applied_at"]
+        needs_collection = want_collection and not row["collection_applied_at"]
+        needs_summary = want_summary and not row["summary_applied_at"]
+        if not (needs_tags or needs_collection or needs_summary):
+            skipped_count += 1
+            continue
+
+        adapter = find_adapter_for_source(cfg, row["source"])
+        if adapter is None or not isinstance(adapter, WritebackAdapter):
+            skipped_count += 1
+            continue
+
+        # Only worth fetching real collections when we might resolve a suggested
+        # one to an id, or ground a fresh AI suggestion in them -- a --tags-only
+        # batch with cached suggestions has no use for them at all.
+        will_generate = cfg.anthropic_enabled and needs_fresh_summary(cfg, row)
+        collections: list[dict] = []
+        if needs_collection or will_generate:
+            if row["source"] not in collections_cache:
+                collections_cache[row["source"]] = (
+                    adapter.list_collections() if hasattr(adapter, "list_collections") else []
+                )
+            collections = collections_cache[row["source"]]
+        collection_names = [c["title"] for c in collections]
+
+        summary_text, suggested_tags, suggested_collection = ensure_ai_suggestions(
+            cfg, store, row, collection_names
+        )
+
+        tags: Optional[list[str]] = suggested_tags if needs_tags and suggested_tags else None
+
+        collection_id: Optional[int] = None
+        collection_title: Optional[str] = None
+        if needs_collection and suggested_collection:
+            match = next((c for c in collections if c["title"].lower() == suggested_collection.lower()), None)
+            if match:
+                collection_id, collection_title = match["id"], match["title"]
+
+        note = summary_text if needs_summary and summary_text else None
+
+        if tags is None and collection_id is None and note is None:
+            skipped_count += 1
+            continue
+
+        try:
+            adapter.apply_updates(row["source_id"], tags=tags, collection_id=collection_id, note=note)
+        except Exception as e:  # noqa: BLE001 -- report and keep going, one bad item shouldn't stop the batch
+            print_warning(f"couldn't apply to {escape(row['title'])}: {escape(str(e))}")
+            skipped_count += 1
+            continue
+
+        store.mark_applied(row["key"], tags=tags is not None, collection=collection_id is not None, summary=note is not None)
+
+        applied: list[str] = []
+        if tags is not None:
+            applied.append(f"tags ({escape(', '.join(tags))})")
+        if collection_id is not None:
+            assert collection_title is not None, "set together with collection_id above"
+            applied.append(f"collection ({escape(collection_title)})")
+        if note is not None:
+            applied.append("summary as note")
+        console.print(f"  [green]applied[/green] {escape(row['title'])}: {', '.join(applied)}")
+        applied_count += 1
+
+    print_success(f"Applied to {applied_count} item(s); {skipped_count} skipped (nothing to do or no write-back support).")
+    return 0
+
+
 def cmd_synthesize(args: argparse.Namespace) -> int:
     cfg = load_config()
     store = StateStore(cfg.state_db_path)
@@ -314,6 +409,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
     for source, count in s["active_by_source"].items():
         source_table.add_row(source, str(count))
     console.print(source_table)
+
+    processing_table = Table(title="By processing state")
+    processing_table.add_column("State")
+    processing_table.add_column("Count", justify="right")
+    for state, count in s["by_processing_state"].items():
+        processing_table.add_row(state, str(count))
+    console.print(processing_table)
     return 0
 
 
@@ -360,6 +462,20 @@ def build_parser() -> argparse.ArgumentParser:
     apply_p.add_argument("--summary", action="store_true", help="Write the AI summary into the source's note field")
     apply_p.add_argument("--all", action="store_true", help="Apply tags, collection, and summary")
     apply_p.set_defaults(func=cmd_apply)
+
+    apply_all_p = sub.add_parser(
+        "apply-all",
+        help="Batch-generate and push suggested tags/collection/summary for up to N unacted items, oldest first",
+    )
+    apply_all_p.add_argument(
+        "--limit", type=int, default=10, metavar="N",
+        help="Max number of items to act on in one run (default: 10)",
+    )
+    apply_all_p.add_argument("--tags", action="store_true", help="Apply suggested tags")
+    apply_all_p.add_argument("--collection", action="store_true", help="Move to the suggested collection")
+    apply_all_p.add_argument("--summary", action="store_true", help="Write the AI summary into the source's note field")
+    apply_all_p.add_argument("--all", action="store_true", help="Apply tags, collection, and summary")
+    apply_all_p.set_defaults(func=cmd_apply_all)
 
     synthesize_p = sub.add_parser(
         "synthesize", help="Pull the full article text into a standalone markdown note for your own writing"

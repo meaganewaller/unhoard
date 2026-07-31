@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from unhoard.schema import Item
-from unhoard.state import StateStore
+from unhoard.state import StateStore, acted_on_flags, processing_state
 
 
 def test_upsert_items_inserts_new_item(state_store: StateStore, make_item: Callable[..., Item]) -> None:
@@ -146,6 +146,44 @@ def test_save_summary(state_store: StateStore, make_item: Callable[..., Item]) -
     assert row["suggested_collection"] == "Old Web Archive"
 
 
+def test_processing_state_freshly_synced_item_is_synced(
+    state_store: StateStore, make_item: Callable[..., Item]
+) -> None:
+    state_store.upsert_items([make_item(source_id="1")])
+
+    row = state_store.find_by_prefix("test:1")[0]
+    assert acted_on_flags(row) == {"tagged": False, "summarized": False, "collected": False}
+    assert processing_state(row) == "synced"
+
+
+def test_processing_state_acted_on_from_any_single_suggestion(
+    state_store: StateStore, make_item: Callable[..., Item]
+) -> None:
+    state_store.upsert_items([make_item(source_id="1")])
+    state_store.save_summary(
+        "test:1", summary="", model="claude-sonnet-5", content_hash="a", context_hash="b",
+        suggested_tags='["geocities"]', suggested_collection="",
+    )
+
+    row = state_store.find_by_prefix("test:1")[0]
+    assert acted_on_flags(row) == {"tagged": True, "summarized": False, "collected": False}
+    assert processing_state(row) == "acted_on"
+
+
+def test_processing_state_synthesized_overrides_acted_on(
+    state_store: StateStore, make_item: Callable[..., Item]
+) -> None:
+    state_store.upsert_items([make_item(source_id="1")])
+    state_store.save_summary(
+        "test:1", summary="A summary.", model="claude-sonnet-5", content_hash="a", context_hash="b",
+        suggested_tags='["geocities"]', suggested_collection="Old Web Archive",
+    )
+    state_store.mark_synthesized("test:1")
+
+    row = state_store.find_by_prefix("test:1")[0]
+    assert processing_state(row) == "synthesized"
+
+
 def test_stats_counts_by_status_and_active_by_source(
     state_store: StateStore, make_item: Callable[..., Item]
 ) -> None:
@@ -160,6 +198,7 @@ def test_stats_counts_by_status_and_active_by_source(
 
     assert stats["by_status"] == {"active": 2, "done": 1}
     assert stats["active_by_source"] == {"raindrop": 1, "chrome": 1}
+    assert stats["by_processing_state"] == {"synced": 3}
 
 
 def test_find_by_prefix_matches_and_empty(
