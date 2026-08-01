@@ -143,3 +143,42 @@ def test_list_collections_aggregates_both_endpoints() -> None:
     collections = RaindropAdapter(token="tok").list_collections()
 
     assert collections == [{"id": 1, "title": "Top level"}, {"id": 2, "title": "Nested"}]
+
+
+@responses.activate
+def test_create_collection() -> None:
+    responses.add(
+        responses.POST, f"{API_BASE}/collection",
+        json={"collection": {"_id": 99, "title": "New Collection"}}, status=201,
+    )
+
+    adapter = RaindropAdapter(token="tok")
+    collection_id = adapter.create_collection("New Collection")
+
+    assert collection_id == 99
+    body = _last_request_body()
+    assert body == {"title": "New Collection"}
+
+
+@responses.activate
+def test_create_collection_fails_on_missing_id() -> None:
+    responses.add(
+        responses.POST, f"{API_BASE}/collection",
+        json={"collection": {}}, status=201,
+    )
+
+    adapter = RaindropAdapter(token="tok")
+    with pytest.raises(RaindropError, match="No collection ID"):
+        adapter.create_collection("New Collection")
+
+
+@responses.activate
+def test_create_collection_fails_on_http_error() -> None:
+    responses.add(
+        responses.POST, f"{API_BASE}/collection",
+        json={"error": "Invalid request"}, status=400,
+    )
+
+    adapter = RaindropAdapter(token="tok")
+    with pytest.raises(RaindropError, match="Failed to create collection"):
+        adapter.create_collection("New Collection")

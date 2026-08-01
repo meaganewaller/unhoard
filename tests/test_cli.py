@@ -416,7 +416,7 @@ class TestApply:
         assert body == {"collection": {"$id": 5}}
 
     @responses.activate
-    def test_suggested_collection_missing_from_source_warns_and_skips(
+    def test_suggested_collection_created_if_missing(
         self,
         store: StateStore,
         make_item: ItemFactory,
@@ -425,15 +425,23 @@ class TestApply:
     ) -> None:
         monkeypatch.setenv("RAINDROP_TOKEN", "tok")
         item = _seed(store, make_item, source="raindrop", source_id="123")
-        store.save_summary(item.key, "", "m", "", "", suggested_collection="Gone")
+        store.save_summary(item.key, "", "m", "", "", suggested_collection="NewCollection")
         responses.add(responses.GET, f"{API_BASE}/collections", json={"items": []}, status=200)
         responses.add(responses.GET, f"{API_BASE}/collections/childrens", json={"items": []}, status=200)
+        responses.add(
+            responses.POST,
+            f"{API_BASE}/collection",
+            json={"collection": {"_id": 99, "title": "NewCollection"}},
+            status=201,
+        )
+        responses.add(responses.PUT, f"{API_BASE}/raindrop/123", json={}, status=200)
 
         exit_code = cli_module.main(["apply", item.key, "--collection"])
 
         captured = capsys.readouterr()
-        assert exit_code == 1
-        assert "suggested collection 'Gone' no longer exists" in captured.err
+        assert exit_code == 0
+        assert "Created collection 'NewCollection'" in captured.out
+        assert "collection (NewCollection)" in captured.out
 
     @responses.activate
     def test_summary_is_applied_as_note(

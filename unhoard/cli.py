@@ -220,8 +220,16 @@ def cmd_apply(args: argparse.Namespace) -> int:
             )
             if match:
                 collection_id, collection_title = match["id"], match["title"]
+            elif hasattr(adapter, "create_collection"):
+                # Collection doesn't exist, but adapter supports creation -- create it now
+                try:
+                    collection_id = adapter.create_collection(suggested_collection)
+                    collection_title = suggested_collection
+                    console.print(f"Created collection '{escape(suggested_collection)}'")
+                except Exception as e:  # noqa: BLE001 -- report and skip collection
+                    print_warning(f"couldn't create collection '{escape(suggested_collection)}': {escape(str(e))}")
             else:
-                print_warning(f"suggested collection '{escape(suggested_collection)}' no longer exists -- skipping.")
+                print_warning(f"suggested collection '{escape(suggested_collection)}' doesn't exist and source doesn't support creation -- skipping.")
 
     note = row["summary"] or None if want_summary else None
     if want_summary and note is None:
@@ -315,6 +323,16 @@ def cmd_apply_all(args: argparse.Namespace) -> int:
             match = next((c for c in collections if c["title"].lower() == suggested_collection.lower()), None)
             if match:
                 collection_id, collection_title = match["id"], match["title"]
+            elif hasattr(adapter, "create_collection"):
+                # Collection doesn't exist, but adapter supports creation -- create it now
+                try:
+                    collection_id = adapter.create_collection(suggested_collection)
+                    collection_title = suggested_collection
+                    # Invalidate cache so next item fetches the updated list
+                    collections_cache[row["source"]] = []
+                    console.print(f"  [dim]created collection '{escape(suggested_collection)}'[/dim]")
+                except Exception as e:  # noqa: BLE001 -- report and skip collection, keep processing
+                    print_warning(f"couldn't create collection '{escape(suggested_collection)}': {escape(str(e))}")
 
         note = summary_text if needs_summary and summary_text else None
 

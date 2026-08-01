@@ -124,3 +124,27 @@ class RaindropAdapter:
                 collections.append({"id": item.get("_id"), "title": item.get("title", "")})
         return collections
 
+    def create_collection(self, title: str) -> int:
+        """Create a new top-level collection on Raindrop.
+
+        Args:
+            title: Name of the collection to create.
+
+        Returns:
+            The ID of the newly created collection.
+
+        Raises:
+            RaindropError: If the collection creation fails.
+        """
+        body = {"title": title}
+        resp = self.session.post(f"{API_BASE}/collection", json=body, timeout=15)
+        try:
+            resp.raise_for_status()
+            data = resp.json()
+            collection_id = data.get("collection", {}).get("_id")
+            if collection_id is None:
+                raise RaindropError(f"No collection ID in response: {data}")
+            return collection_id
+        except requests.exceptions.RequestException as e:
+            raise RaindropError(f"Failed to create collection '{title}': {e}")
+
