@@ -5,8 +5,13 @@ from unittest.mock import patch
 
 import pytest
 
-from unhoard.review import review_collections_interactive, _edit_collections_interactive
-from unhoard.types import CollectionSuggestion
+from unhoard.review import (
+    review_collections_interactive,
+    _edit_collections_interactive,
+    review_tags_interactive,
+    _edit_collection_tags_interactive,
+)
+from unhoard.types import CollectionSuggestion, TagSuggestion
 
 
 def _make_suggestion(item_id: int, title: str, collection: str) -> CollectionSuggestion:
@@ -166,3 +171,133 @@ class TestEditCollectionsInteractive:
         with patch("builtins.input", return_value="done"):
             result = _edit_collections_interactive(suggestions, collections)
         assert all(isinstance(s, CollectionSuggestion) for s in result)
+
+
+# ---------------------------------------------------------------------------
+# TagSuggestion helpers
+# ---------------------------------------------------------------------------
+
+def _make_tag_suggestion(
+    item_id: int,
+    title: str,
+    use_case_tags: list[str] | None = None,
+    status_tags: list[str] | None = None,
+    collection_id: int = 1,
+) -> TagSuggestion:
+    return TagSuggestion(
+        item_id=item_id,
+        item_title=title,
+        use_case_tags=use_case_tags or ["reference"],
+        status_tags=status_tags or ["reviewed"],
+    )
+
+
+def _make_tag_suggestions() -> list[TagSuggestion]:
+    return [
+        _make_tag_suggestion(1, "Python async patterns", ["reference", "learning"], ["reviewed"]),
+        _make_tag_suggestion(2, "CSS Grid tutorial", ["learning"], ["wip"]),
+        _make_tag_suggestion(3, "React hooks guide", ["reference"], ["reviewed"]),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# review_tags_interactive — accept all ('y')
+# ---------------------------------------------------------------------------
+
+class TestReviewTagsAcceptsAll:
+    def test_review_tags_accepts_all(self) -> None:
+        """User responds 'y' to all collection prompts — all suggestions returned unchanged."""
+        suggestions = _make_tag_suggestions()
+        # by_collection=False: single flat 'y' response
+        with patch("builtins.input", return_value="y"):
+            result = review_tags_interactive(suggestions, by_collection=False)
+        assert result == suggestions
+
+    def test_returns_list_of_tag_suggestions(self) -> None:
+        suggestions = _make_tag_suggestions()
+        with patch("builtins.input", return_value="y"):
+            result = review_tags_interactive(suggestions, by_collection=False)
+        assert all(isinstance(s, TagSuggestion) for s in result)
+
+    def test_length_preserved_on_accept(self) -> None:
+        suggestions = _make_tag_suggestions()
+        with patch("builtins.input", return_value="y"):
+            result = review_tags_interactive(suggestions, by_collection=False)
+        assert len(result) == len(suggestions)
+
+    def test_empty_input_returns_empty(self) -> None:
+        with patch("builtins.input", return_value="y"):
+            result = review_tags_interactive([])
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# review_tags_interactive — by_collection grouping
+# ---------------------------------------------------------------------------
+
+class TestReviewTagsByCollection:
+    def test_by_collection_accepts_each_group(self) -> None:
+        """With by_collection=True, each group gets a 'y' prompt; all items returned."""
+        suggestions = _make_tag_suggestions()
+        collections = {1: "Development", 2: "Design"}
+        # All items are in collection 1 in this fixture (no collection_id on TagSuggestion,
+        # so we use a single-group scenario for simplicity)
+        with patch("builtins.input", return_value="y"):
+            result = review_tags_interactive(suggestions, by_collection=True, collections=collections)
+        assert len(result) == len(suggestions)
+        assert all(isinstance(s, TagSuggestion) for s in result)
+
+    def test_by_collection_no_collections_map_still_works(self) -> None:
+        """by_collection=True without collections map falls back gracefully."""
+        suggestions = _make_tag_suggestions()
+        with patch("builtins.input", return_value="y"):
+            result = review_tags_interactive(suggestions, by_collection=True)
+        assert len(result) == len(suggestions)
+
+
+# ---------------------------------------------------------------------------
+# review_tags_interactive — reject ('n')
+# ---------------------------------------------------------------------------
+
+class TestReviewTagsReject:
+    def test_reject_flat_returns_empty(self) -> None:
+        """User responds 'n' — suggestions for that batch dropped."""
+        suggestions = _make_tag_suggestions()
+        with patch("builtins.input", return_value="n"):
+            result = review_tags_interactive(suggestions, by_collection=False)
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# _edit_collection_tags_interactive
+# ---------------------------------------------------------------------------
+
+class TestEditCollectionTagsInteractive:
+    def test_keep_all_tags_returns_unchanged(self) -> None:
+        """User keeps all items — returns suggestions as-is."""
+        suggestions = _make_tag_suggestions()
+        # 'y' for each item
+        with patch("builtins.input", return_value="y"):
+            result = _edit_collection_tags_interactive(suggestions)
+        assert len(result) == len(suggestions)
+        assert all(isinstance(s, TagSuggestion) for s in result)
+
+    def test_reject_single_item_removes_it(self) -> None:
+        """User rejects item 2 — it is dropped from results."""
+        suggestions = _make_tag_suggestions()
+        # First item: keep ('y'), second: reject ('n'), third: keep ('y')
+        with patch("builtins.input", side_effect=["y", "n", "y"]):
+            result = _edit_collection_tags_interactive(suggestions)
+        assert len(result) == 2
+        ids = [s.item_id for s in result]
+        assert 2 not in ids
+
+    def test_edit_item_tags_updates_them(self) -> None:
+        """User edits item 1 tags — new tags are stored."""
+        suggestions = [_make_tag_suggestion(1, "Python async patterns", ["reference"], ["reviewed"])]
+        # Sequence: 'e' to edit, then new use_case tags, then new status tags
+        with patch("builtins.input", side_effect=["e", "tool,learning", "wip"]):
+            result = _edit_collection_tags_interactive(suggestions)
+        assert len(result) == 1
+        assert result[0].use_case_tags == ["tool", "learning"]
+        assert result[0].status_tags == ["wip"]

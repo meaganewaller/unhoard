@@ -1,15 +1,18 @@
-"""Interactive CLI for reviewing and refining collection suggestions.
+"""Interactive CLI for reviewing and refining collection and tag suggestions.
 
 Public API
 ----------
 review_collections_interactive(suggestions) -> list[CollectionSuggestion]
 _edit_collections_interactive(suggestions, collections) -> list[CollectionSuggestion]
+review_tags_interactive(suggestions, by_collection, collections) -> list[TagSuggestion]
+_edit_collection_tags_interactive(items) -> list[TagSuggestion]
 """
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Optional
 
-from unhoard.types import CollectionSuggestion
+from unhoard.types import CollectionSuggestion, TagSuggestion
 
 _SAMPLE_SIZE = 3  # max items to show per collection in the summary
 
@@ -146,3 +149,121 @@ def _reassign_item(
                 item.suggested_collection = new_collection
                 collections[new_collection].append(item)
                 return
+
+
+# ---------------------------------------------------------------------------
+# Tag review
+# ---------------------------------------------------------------------------
+
+_TAG_SAMPLE_SIZE = 20  # max items shown per collection for detailed review
+
+
+def review_tags_interactive(
+    suggestions: list[TagSuggestion],
+    by_collection: bool = True,
+    collections: Optional[dict[int, str]] = None,
+) -> list[TagSuggestion]:
+    """Interactive CLI review of tag suggestions.
+
+    User can:
+    - Accept all tags
+    - Accept/reject per collection
+    - Edit individual item tags
+
+    Returns:
+        Reviewed and potentially modified suggestions.
+    """
+    if not suggestions:
+        return []
+
+    print("\n=== REVIEW TAG SUGGESTIONS ===\n")
+
+    if not by_collection:
+        # Flat review — single prompt for the whole batch
+        answer = input(f"Accept all {len(suggestions)} tag suggestions? [y/n/edit]: ").strip().lower()
+        if answer == "y":
+            return list(suggestions)
+        if answer == "n":
+            return []
+        if answer == "edit":
+            return _edit_collection_tags_interactive(suggestions)
+        # Unrecognized — treat as accept
+        return list(suggestions)
+
+    # Group by collection_id when collections map is provided, otherwise treat as
+    # a single unnamed group so the function still works without a map.
+    if collections:
+        groups: dict[str, list[TagSuggestion]] = defaultdict(list)
+        for s in suggestions:
+            # TagSuggestion doesn't carry a collection_id; look up by item_id if
+            # a mapping is provided, otherwise fall into a single "All items" group.
+            group_name = collections.get(s.item_id, "All items")
+            groups[group_name].append(s)
+    else:
+        groups = {"All items": list(suggestions)}
+
+    result: list[TagSuggestion] = []
+    for group_name, items in groups.items():
+        print(f"\nCollection: {group_name} ({len(items)} items)")
+        _print_tag_sample(items[:_TAG_SAMPLE_SIZE])
+
+        answer = input(f"Accept all tags for '{group_name}'? [y/n/edit]: ").strip().lower()
+        if answer == "y":
+            result.extend(items)
+        elif answer == "n":
+            # Drop this group's items (user rejected them)
+            pass
+        elif answer == "edit":
+            # Show first 20 for interactive editing; auto-accept the rest
+            edited = _edit_collection_tags_interactive(items[:_TAG_SAMPLE_SIZE])
+            result.extend(edited)
+            result.extend(items[_TAG_SAMPLE_SIZE:])
+        else:
+            # Unrecognized response — accept as-is
+            result.extend(items)
+
+    return result
+
+
+def _edit_collection_tags_interactive(items: list[TagSuggestion]) -> list[TagSuggestion]:
+    """Edit tags for items in a single collection.
+
+    For each item the user is shown the title and current tags, then asked:
+    - 'y'  — keep as-is
+    - 'n'  — drop the item from results
+    - 'e'  — enter new use_case_tags and status_tags (comma-separated)
+
+    Returns the reviewed (and possibly edited/pruned) list.
+    """
+    result: list[TagSuggestion] = []
+    for item in items:
+        use_case_str = ", ".join(item.use_case_tags)
+        status_str = ", ".join(item.status_tags)
+        print(f"\n  [{item.item_id}] {item.item_title}")
+        print(f"       use-case: {use_case_str}")
+        print(f"       status  : {status_str}")
+        answer = input("  Keep? [y/n/e]: ").strip().lower()
+
+        if answer == "n":
+            # Drop this item
+            continue
+        elif answer == "e":
+            new_use_case_raw = input("  New use-case tags (comma-separated): ").strip()
+            new_status_raw = input("  New status tags (comma-separated): ").strip()
+            item.use_case_tags = [t.strip() for t in new_use_case_raw.split(",") if t.strip()]
+            item.status_tags = [t.strip() for t in new_status_raw.split(",") if t.strip()]
+            result.append(item)
+        else:
+            # 'y' or anything else — keep as-is
+            result.append(item)
+
+    return result
+
+
+def _print_tag_sample(items: list[TagSuggestion]) -> None:
+    """Print a compact summary of tag suggestions."""
+    for item in items:
+        use_case_str = ", ".join(item.use_case_tags) or "(none)"
+        status_str = ", ".join(item.status_tags) or "(none)"
+        print(f"  [{item.item_id}] {item.item_title}")
+        print(f"       use-case: {use_case_str}  |  status: {status_str}")
