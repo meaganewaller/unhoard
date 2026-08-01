@@ -8,9 +8,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from unhoard.analyze import _parse_collection_suggestions, suggest_collections
+from unhoard.analyze import (
+    _parse_collection_suggestions,
+    _parse_tag_suggestions,
+    suggest_collections,
+    suggest_tags,
+)
 from unhoard.schema import Item
-from unhoard.types import CollectionSuggestion
+from unhoard.types import CollectionSuggestion, TagSuggestion
 
 
 def _make_item(source_id: str, title: str, url: str = "https://example.com") -> Item:
@@ -323,3 +328,256 @@ class TestSuggestCollections:
         suggestions = suggest_collections(items)
 
         assert suggestions[0].item_id == 42
+
+
+# ---------------------------------------------------------------------------
+# _parse_tag_suggestions
+# ---------------------------------------------------------------------------
+
+class TestParseTagSuggestions:
+    def _items(self) -> list[Item]:
+        return [
+            _make_item("1", "Python async patterns"),
+            _make_item("2", "CSS Grid tutorial"),
+        ]
+
+    def test_parses_two_suggestions(self) -> None:
+        text = (
+            "Item ID: 1\n"
+            "Use-Case Tags: reference, learning\n"
+            "Status Tags: reviewed\n"
+            "Reasoning: Core learning reference\n"
+            "\n"
+            "Item ID: 2\n"
+            "Use-Case Tags: learning\n"
+            "Status Tags: needs-refinement\n"
+            "Reasoning: Design tutorial worth revisiting\n"
+        )
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert len(suggestions) == 2
+        assert suggestions[0].use_case_tags == ["reference", "learning"]
+        assert suggestions[0].status_tags == ["reviewed"]
+        assert suggestions[1].use_case_tags == ["learning"]
+        assert suggestions[1].status_tags == ["needs-refinement"]
+
+    def test_item_title_filled_from_item(self) -> None:
+        text = (
+            "Item ID: 1\n"
+            "Use-Case Tags: tool\n"
+            "Status Tags: wip\n"
+        )
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert suggestions[0].item_title == "Python async patterns"
+
+    def test_reasoning_captured(self) -> None:
+        text = (
+            "Item ID: 1\n"
+            "Use-Case Tags: inspiration\n"
+            "Status Tags: archived\n"
+            "Reasoning: Old but insightful read\n"
+        )
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert suggestions[0].reasoning == "Old but insightful read"
+
+    def test_unknown_id_skipped(self) -> None:
+        text = (
+            "Item ID: 99\n"
+            "Use-Case Tags: bookmark\n"
+            "Status Tags: reviewed\n"
+        )
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert len(suggestions) == 0
+
+    def test_empty_response_returns_empty_list(self) -> None:
+        assert _parse_tag_suggestions("", self._items()) == []
+
+    def test_multiple_use_case_tags(self) -> None:
+        text = (
+            "Item ID: 1\n"
+            "Use-Case Tags: reference, tool, project\n"
+            "Status Tags: reviewed\n"
+        )
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert "reference" in suggestions[0].use_case_tags
+        assert "tool" in suggestions[0].use_case_tags
+        assert "project" in suggestions[0].use_case_tags
+
+    def test_multiple_status_tags(self) -> None:
+        text = (
+            "Item ID: 1\n"
+            "Use-Case Tags: learning\n"
+            "Status Tags: wip, needs-refinement\n"
+        )
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert "wip" in suggestions[0].status_tags
+        assert "needs-refinement" in suggestions[0].status_tags
+
+    def test_invalid_use_case_tags_filtered(self) -> None:
+        """Tags not in the allowed set should be silently dropped."""
+        text = (
+            "Item ID: 1\n"
+            "Use-Case Tags: reference, nonsense-tag, learning\n"
+            "Status Tags: reviewed\n"
+        )
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert "nonsense-tag" not in suggestions[0].use_case_tags
+        assert suggestions[0].use_case_tags == ["reference", "learning"]
+
+    def test_invalid_status_tags_filtered(self) -> None:
+        text = (
+            "Item ID: 1\n"
+            "Use-Case Tags: tool\n"
+            "Status Tags: reviewed, invalid-status\n"
+        )
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert "invalid-status" not in suggestions[0].status_tags
+        assert suggestions[0].status_tags == ["reviewed"]
+
+    def test_item_id_integer_resolution(self) -> None:
+        text = (
+            "Item ID: 42\n"
+            "Use-Case Tags: bookmark\n"
+            "Status Tags: archived\n"
+        )
+        items = [_make_item("42", "Special Article")]
+        suggestions = _parse_tag_suggestions(text, items)
+        assert suggestions[0].item_id == 42
+
+
+# ---------------------------------------------------------------------------
+# suggest_tags
+# ---------------------------------------------------------------------------
+
+class TestSuggestTags:
+    def _items(self) -> list[Item]:
+        return [
+            _make_item("1", "Python async patterns"),
+            _make_item("2", "CSS Grid tutorial"),
+        ]
+
+    def _collections(self) -> dict[int, str]:
+        return {1: "Development", 2: "Design"}
+
+    @patch("unhoard.analyze.requests.post")
+    def test_suggest_tags_returns_suggestions(self, mock_post: MagicMock) -> None:
+        """Happy path: suggest_tags returns TagSuggestion objects for each item."""
+        response_text = (
+            "Item ID: 1\n"
+            "Use-Case Tags: reference, learning\n"
+            "Status Tags: reviewed\n"
+            "Reasoning: Core Python reference content\n"
+            "\n"
+            "Item ID: 2\n"
+            "Use-Case Tags: learning, inspiration\n"
+            "Status Tags: needs-refinement\n"
+            "Reasoning: CSS design learning resource\n"
+        )
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "content": [{"type": "text", "text": response_text}]
+        }
+        mock_post.return_value = mock_resp
+
+        suggestions = suggest_tags(self._items(), self._collections())
+
+        assert len(suggestions) == 2
+        assert all(isinstance(s, TagSuggestion) for s in suggestions)
+        assert all(hasattr(s, "item_id") for s in suggestions)
+        assert all(hasattr(s, "use_case_tags") for s in suggestions)
+        assert all(hasattr(s, "status_tags") for s in suggestions)
+
+    def test_empty_items_returns_empty_list(self) -> None:
+        result = suggest_tags([], {})
+        assert result == []
+
+    @patch("unhoard.analyze.requests.post")
+    def test_api_error_returns_empty_list(self, mock_post: MagicMock) -> None:
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = Exception("500 Server Error")
+        mock_post.return_value = mock_resp
+
+        result = suggest_tags(self._items(), self._collections())
+        assert result == []
+
+    @patch("unhoard.analyze.requests.post")
+    def test_connection_error_returns_empty_list(self, mock_post: MagicMock) -> None:
+        mock_post.side_effect = Exception("Connection refused")
+
+        result = suggest_tags(self._items(), self._collections())
+        assert result == []
+
+    @patch("unhoard.analyze.requests.post")
+    def test_groups_by_collection_for_batching(self, mock_post: MagicMock) -> None:
+        """Items in the same collection should be sent in one LLM call."""
+        items = [
+            _make_item("1", "Python async patterns"),
+            _make_item("2", "Python type hints"),
+            _make_item("3", "CSS Grid tutorial"),
+        ]
+        collections = {1: "Development", 2: "Development", 3: "Design"}
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"content": [{"type": "text", "text": ""}]}
+        mock_post.return_value = mock_resp
+
+        suggest_tags(items, collections)
+
+        # Two collections -> two LLM calls
+        assert mock_post.call_count == 2
+
+    @patch("unhoard.analyze.requests.post")
+    def test_prompt_includes_collection_name(self, mock_post: MagicMock) -> None:
+        """The LLM prompt should mention the collection name for context."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"content": [{"type": "text", "text": ""}]}
+        mock_post.return_value = mock_resp
+
+        suggest_tags(self._items(), self._collections())
+
+        call_args_list = mock_post.call_args_list
+        prompts = [
+            c.kwargs["json"]["messages"][0]["content"] for c in call_args_list
+        ]
+        all_prompts = "\n".join(prompts)
+        assert "Development" in all_prompts or "Design" in all_prompts
+
+    @patch("unhoard.analyze.requests.post")
+    def test_uses_correct_model(self, mock_post: MagicMock) -> None:
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"content": [{"type": "text", "text": ""}]}
+        mock_post.return_value = mock_resp
+
+        suggest_tags(self._items(), self._collections())
+
+        for call in mock_post.call_args_list:
+            model = call.kwargs["json"]["model"]
+            assert "claude" in model
+
+    @patch("unhoard.analyze.requests.post")
+    def test_items_without_collection_assignment_still_processed(
+        self, mock_post: MagicMock
+    ) -> None:
+        """Items with no entry in collections dict go into an 'Uncategorized' batch."""
+        items = [_make_item("5", "Orphan Item")]
+        collections: dict[int, str] = {}  # nothing mapped
+
+        response_text = (
+            "Item ID: 5\n"
+            "Use-Case Tags: bookmark\n"
+            "Status Tags: reviewed\n"
+        )
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "content": [{"type": "text", "text": response_text}]
+        }
+        mock_post.return_value = mock_resp
+
+        suggestions = suggest_tags(items, collections)
+
+        # Should still get a suggestion for item 5
+        assert any(s.item_id == 5 for s in suggestions)
