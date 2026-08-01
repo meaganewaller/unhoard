@@ -288,7 +288,7 @@ unhoard analyze [--items COUNT] [--auto-apply]
 
 ## Future Work (Deferred)
 
-1. **Agent access** — expose unhoard collections + search to Claude agents (separate bead)
+1. **Agent access** — expose unhoard collections + search to Claude agents (unhoard-nrw)
 2. **Browser UI** — web interface for browsing and filtering collections
 3. **Incremental analysis** — analyze new items as they're added
 4. **Tag refinement** — post-apply feedback loop (user rates suggestions, improves model)
