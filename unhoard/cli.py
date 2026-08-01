@@ -328,8 +328,9 @@ def cmd_apply_all(args: argparse.Namespace) -> int:
                 try:
                     collection_id = adapter.create_collection(suggested_collection)
                     collection_title = suggested_collection
-                    # Invalidate cache so next item fetches the updated list
-                    collections_cache[row["source"]] = []
+                    # Add to in-memory cache so subsequent items in this batch find it
+                    collections.append({"id": collection_id, "title": suggested_collection})
+                    collections_cache[row["source"]] = collections
                     console.print(f"  [dim]created collection '{escape(suggested_collection)}'[/dim]")
                 except Exception as e:  # noqa: BLE001 -- report and skip collection, keep processing
                     print_warning(f"couldn't create collection '{escape(suggested_collection)}': {escape(str(e))}")
