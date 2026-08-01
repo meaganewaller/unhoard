@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
 from .schema import Item
+from .types import CollectionSuggestion, TagSuggestion
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -271,4 +272,98 @@ class StateStore:
         return self.conn.execute(
             "SELECT * FROM items WHERE key LIKE ?", (f"{key_prefix}%",)
         ).fetchall()
+
+    def fetch_untagged_items(self, limit: int = 1504) -> list[Item]:
+        """Fetch active items without assigned collections.
+
+        Returns the oldest items first (by created_at) so batch runs make
+        consistent progress through the backlog.
+        """
+        rows = self.conn.execute(
+            """SELECT * FROM items
+               WHERE status = 'active'
+                 AND (suggested_collection IS NULL OR suggested_collection = '')
+               ORDER BY created_at ASC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+
+        items: list[Item] = []
+        for row in rows:
+            try:
+                tags = json.loads(row["tags"] or "[]")
+            except json.JSONDecodeError:
+                tags = []
+            items.append(
+                Item(
+                    source=row["source"],
+                    source_id=row["source_id"],
+                    title=row["title"] or "",
+                    url=row["url"] or "",
+                    tags=tags,
+                    excerpt=row["excerpt"] or "",
+                    created_at=Item.parse_dt(row["created_at"]),
+                    collection=row["collection"] or "",
+                )
+            )
+        return items
+
+    def bulk_store_suggestions(
+        self,
+        items: list[Item],
+        collection_suggestions: list[CollectionSuggestion],
+        tag_suggestions: list[TagSuggestion],
+    ) -> None:
+        """Store all suggestions in the DB.
+
+        Matches suggestions to items by source_id (numeric where possible,
+        otherwise by hash — the same resolution used in analyze.py).  Items
+        with no matching suggestion are left unchanged.
+        """
+        # Build a lookup of item by resolved integer id -> source_id so we can
+        # join suggestions (which carry item_id as int) back to DB rows.
+        id_to_source_id: dict[int, str] = {}
+        for item in items:
+            try:
+                resolved = int(item.source_id)
+            except ValueError:
+                resolved = abs(hash(item.source_id)) % (10**9)
+            id_to_source_id[resolved] = item.source_id
+
+        # Build per-source_id maps for fast lookup.
+        collection_by_sid: dict[str, str] = {}
+        for cs in collection_suggestions:
+            sid = id_to_source_id.get(cs.item_id)
+            if sid is not None:
+                collection_by_sid[sid] = cs.suggested_collection
+
+        tags_by_sid: dict[str, list[str]] = {}
+        for ts in tag_suggestions:
+            sid = id_to_source_id.get(ts.item_id)
+            if sid is not None:
+                tags_by_sid[sid] = ts.use_case_tags + ts.status_tags
+
+        with self._cursor() as cur:
+            for item in items:
+                sid = item.source_id
+                new_collection = collection_by_sid.get(sid)
+                new_tags = tags_by_sid.get(sid)
+
+                if new_collection is None and new_tags is None:
+                    continue
+
+                fields: list[str] = []
+                values: list[object] = []
+                if new_collection is not None:
+                    fields.append("suggested_collection=?")
+                    values.append(new_collection)
+                if new_tags is not None:
+                    fields.append("suggested_tags=?")
+                    values.append(json.dumps(new_tags))
+
+                values.append(item.key)
+                cur.execute(
+                    f"UPDATE items SET {', '.join(fields)} WHERE key=?",
+                    values,
+                )
 

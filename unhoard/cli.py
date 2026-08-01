@@ -15,8 +15,10 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .adapters.base import WritebackAdapter
+from .analyze import suggest_collections, suggest_tags
 from .config import load_config, write_default_config, CONFIG_PATH
 from .digest import build_digest, ensure_ai_suggestions, needs_fresh_summary
+from .review import review_collections_interactive, review_tags_interactive
 from .sources import build_adapters, find_adapter_for_source
 from .state import StateStore
 from .summarize import fetch_article_text
@@ -419,6 +421,83 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    """Analyze untagged items and suggest collections and tags.
+
+    Pipeline: fetch → suggest collections → review → suggest tags → review → store.
+    Exits early if the user cancels either review step.
+    """
+    cfg = load_config()
+    store = StateStore(cfg.state_db_path)
+
+    # Step 1: Fetch untagged items.
+    console.print(f"Fetching up to [bold]{args.items}[/bold] untagged items...")
+    items = store.fetch_untagged_items(limit=args.items)
+    if not items:
+        print_warning("No untagged items found — nothing to analyze.")
+        return 0
+    console.print(f"  Found [bold]{len(items)}[/bold] items.")
+
+    # Step 2: LLM collection clustering.
+    console.print("Suggesting collections via LLM...")
+    collection_suggestions = suggest_collections(items, limit=args.items)
+    if not collection_suggestions:
+        print_warning("LLM returned no collection suggestions — check ANTHROPIC_API_KEY.")
+        return 1
+    console.print(f"  Got [bold]{len(collection_suggestions)}[/bold] collection suggestion(s).")
+
+    # Step 3: User review of collections (skip when --auto-apply).
+    if args.auto_apply:
+        reviewed_collections = collection_suggestions
+    else:
+        reviewed_collections = review_collections_interactive(collection_suggestions)
+        if not reviewed_collections:
+            console.print("[dim]Review canceled — no changes saved.[/dim]")
+            return 0
+
+    # Step 4: Build the collection map (item_id -> collection name) for tag grouping.
+    collections_map: dict[int, str] = {
+        cs.item_id: cs.suggested_collection for cs in reviewed_collections
+    }
+
+    # Step 5: LLM tag suggestion.
+    console.print("Suggesting tags via LLM...")
+    tag_suggestions = suggest_tags(items, collections_map)
+    if not tag_suggestions:
+        print_warning("LLM returned no tag suggestions.")
+    else:
+        console.print(f"  Got [bold]{len(tag_suggestions)}[/bold] tag suggestion(s).")
+
+    # Step 6: User review of tags (skip when --auto-apply).
+    if args.auto_apply:
+        reviewed_tags = tag_suggestions
+    else:
+        reviewed_tags = review_tags_interactive(
+            tag_suggestions, by_collection=True, collections=collections_map
+        )
+        if reviewed_tags is None:
+            reviewed_tags = []
+
+    # Step 7: Persist to DB.
+    console.print("Saving suggestions to local state...")
+    store.bulk_store_suggestions(items, reviewed_collections, reviewed_tags)
+    print_success(
+        f"Stored {len(reviewed_collections)} collection suggestion(s) "
+        f"and {len(reviewed_tags)} tag suggestion(s)."
+    )
+
+    # Step 8: Offer to sync to Raindrop.
+    if _is_interactive():
+        try:
+            answer = input("Sync suggestions to Raindrop now? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer == "y":
+            console.print("[dim]Tip: run `unhoard apply-all --all` to push suggestions to Raindrop.[/dim]")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="unhoard", description="Daily triage digest for your reading backlog.")
     sub = p.add_subparsers(dest="command")
@@ -486,6 +565,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     stats_p = sub.add_parser("stats", help="Show counts by status and source")
     stats_p.set_defaults(func=cmd_stats)
+
+    analyze_p = sub.add_parser(
+        "analyze",
+        help="Analyze untagged items and suggest collections and tags via LLM",
+    )
+    analyze_p.add_argument(
+        "--items", type=int, default=1504, metavar="N",
+        help="Max items to analyze (default: 1504)",
+    )
+    analyze_p.add_argument(
+        "--auto-apply", action="store_true",
+        help="Skip interactive review and auto-apply all suggestions",
+    )
+    analyze_p.set_defaults(func=cmd_analyze)
 
     return p
 
