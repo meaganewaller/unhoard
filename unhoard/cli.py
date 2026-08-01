@@ -475,8 +475,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         reviewed_tags = review_tags_interactive(
             tag_suggestions, by_collection=True, collections=collections_map
         )
-        if reviewed_tags is None:
-            reviewed_tags = []
+        if not reviewed_tags:
+            console.print("[dim]Tag review cancelled — no changes saved.[/dim]")
+            return 0
 
     # Step 7: Persist to DB.
     console.print("Saving suggestions to local state...")

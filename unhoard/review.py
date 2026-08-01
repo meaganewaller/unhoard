@@ -9,6 +9,7 @@ _edit_collection_tags_interactive(items) -> list[TagSuggestion]
 """
 from __future__ import annotations
 
+import copy
 from collections import defaultdict
 from typing import Optional
 
@@ -36,9 +37,9 @@ def review_collections_interactive(
         return []
 
     # Group by collection name for display and editing.
-    # We keep a mutable working copy so edits don't affect the original list
-    # until the user accepts.
-    working: list[CollectionSuggestion] = list(suggestions)
+    # Deep-copy so edits to suggestion objects (e.g. suggested_collection) never
+    # mutate the caller's originals, even when the user ultimately cancels.
+    working: list[CollectionSuggestion] = copy.deepcopy(suggestions)
 
     while True:
         collections: dict[str, list[CollectionSuggestion]] = defaultdict(list)
@@ -46,7 +47,11 @@ def review_collections_interactive(
             collections[s.suggested_collection].append(s)
 
         _print_summary(collections)
-        answer = input("Looks good? [y/n/edit]: ").strip().lower()
+        try:
+            answer = input("Looks good? [y/n/edit]: ").strip().lower()
+        except EOFError:
+            # Non-TTY / piped input: treat as cancel to avoid infinite loop
+            return []
 
         if answer == "y":
             return working
@@ -55,6 +60,8 @@ def review_collections_interactive(
         if answer == "edit":
             working = _edit_collections_interactive(working, collections)
             # Continue loop to show updated summary and re-prompt
+        else:
+            print("Invalid input — please enter y, n, or edit.")
 
 
 def _edit_collections_interactive(

@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS items (
     note TEXT,
     suggested_tags TEXT,
     suggested_collection TEXT,
+    suggestion_created_at TEXT,
     tags_applied_at TEXT,
     collection_applied_at TEXT,
     summary_applied_at TEXT,
@@ -98,6 +99,7 @@ class StateStore:
 
     _MIGRATION_COLUMNS: list[str] = [
         "context_hash", "note", "suggested_tags", "suggested_collection",
+        "suggestion_created_at",
         "tags_applied_at", "collection_applied_at", "summary_applied_at", "synthesized_at",
     ]
 
@@ -343,6 +345,7 @@ class StateStore:
             if sid is not None:
                 tags_by_sid[sid] = ts.use_case_tags + ts.status_tags
 
+        now = datetime.now(timezone.utc).isoformat()
         with self._cursor() as cur:
             for item in items:
                 sid = item.source_id
@@ -358,8 +361,24 @@ class StateStore:
                     fields.append("suggested_collection=?")
                     values.append(new_collection)
                 if new_tags is not None:
+                    # Merge (union) with any previously stored suggested_tags so
+                    # repeated analysis runs accumulate tags rather than overwrite them.
+                    row = cur.execute(
+                        "SELECT suggested_tags FROM items WHERE key=?", (item.key,)
+                    ).fetchone()
+                    existing_tags: list[str] = []
+                    if row and row["suggested_tags"]:
+                        try:
+                            existing_tags = json.loads(row["suggested_tags"])
+                        except json.JSONDecodeError:
+                            existing_tags = []
+                    merged_tags = list(dict.fromkeys(existing_tags + new_tags))
                     fields.append("suggested_tags=?")
-                    values.append(json.dumps(new_tags))
+                    values.append(json.dumps(merged_tags))
+
+                # Always record the suggestion timestamp when any field is updated.
+                fields.append("suggestion_created_at=?")
+                values.append(now)
 
                 values.append(item.key)
                 cur.execute(

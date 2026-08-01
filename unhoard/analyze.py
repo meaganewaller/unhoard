@@ -13,6 +13,7 @@ _parse_tag_suggestions(text, items) -> list[TagSuggestion]  (semi-public for tes
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from collections import defaultdict
@@ -22,6 +23,21 @@ import requests
 
 from unhoard.schema import Item
 from unhoard.types import CollectionSuggestion, TagSuggestion
+
+def _stable_id(source_id: str) -> int:
+    """Convert a source_id to a stable integer item_id.
+
+    Uses int() for numeric IDs and a stable MD5-based hash for non-numeric
+    ones.  Python's built-in hash() is deliberately NOT used here: its seed
+    changes across processes (PYTHONHASHSEED), so non-numeric IDs would resolve
+    to different integers in different runs and fail to match DB rows.
+    """
+    try:
+        return int(source_id)
+    except ValueError:
+        digest = hashlib.md5(source_id.encode(), usedforsecurity=False).hexdigest()[:8]
+        return int(digest, 16)
+
 
 _VALID_USE_CASE_TAGS = frozenset(
     {"reference", "learning", "inspiration", "project", "tool", "bookmark"}
@@ -73,17 +89,16 @@ def suggest_collections(
         return []
 
     working = items[:limit]
-    sample = working[:_SAMPLE_SIZE]
 
     items_block = "\n".join(
         f"- ID: {item.source_id} | Title: {item.title} | URL: {item.url}"
         + (f" | Note: {item.excerpt}" if item.excerpt else "")
-        for item in sample
+        for item in working
     )
 
     prompt = _PROMPT_TEMPLATE.format(
         count=len(working),
-        sample_size=_SAMPLE_SIZE,
+        sample_size=len(working),
         items_block=items_block,
     )
 
@@ -156,11 +171,8 @@ def _parse_collection_suggestions(
         item = items_by_id.get(current_source_id)
         if item is None:
             return
-        # Resolve item_id: use int(source_id) when numeric, else fallback to hash.
-        try:
-            item_id = int(current_source_id)
-        except ValueError:
-            item_id = abs(hash(current_source_id)) % (10**9)
+        # Resolve item_id: use int(source_id) when numeric, else stable MD5-based hash.
+        item_id = _stable_id(current_source_id)
 
         suggestions.append(
             CollectionSuggestion(
@@ -262,10 +274,7 @@ def suggest_tags(
     # Group items by their suggested collection name.
     groups: dict[str, list[Item]] = defaultdict(list)
     for item in items:
-        try:
-            item_id = int(item.source_id)
-        except ValueError:
-            item_id = abs(hash(item.source_id)) % (10**9)
+        item_id = _stable_id(item.source_id)
         collection_name = collections.get(item_id, "Uncategorized")
         groups[collection_name].append(item)
 
@@ -275,10 +284,14 @@ def suggest_tags(
     all_suggestions: list[TagSuggestion] = []
 
     for collection_name, group_items in groups.items():
+        # Cap the items sent per-group to avoid exceeding the context window.
+        # The full group is still tagged — items beyond _SAMPLE_SIZE reuse the
+        # same collection context so the LLM guidance stays coherent.
+        prompt_items = group_items[:_SAMPLE_SIZE]
         items_block = "\n".join(
             f"- ID: {item.source_id} | Title: {item.title} | URL: {item.url}"
             + (f" | Note: {item.excerpt}" if item.excerpt else "")
-            for item in group_items
+            for item in prompt_items
         )
 
         prompt = _TAG_PROMPT_TEMPLATE.format(
@@ -348,10 +361,7 @@ def _parse_tag_suggestions(
         item = items_by_id.get(current_source_id)
         if item is None:
             return
-        try:
-            item_id = int(current_source_id)
-        except ValueError:
-            item_id = abs(hash(current_source_id)) % (10**9)
+        item_id = _stable_id(current_source_id)
 
         suggestions.append(
             TagSuggestion(
