@@ -149,7 +149,7 @@ def test_list_collections_aggregates_both_endpoints() -> None:
 def test_create_collection() -> None:
     responses.add(
         responses.POST, f"{API_BASE}/collection",
-        json={"collection": {"_id": 99, "title": "New Collection"}}, status=201,
+        json={"result": True, "item": {"_id": 99, "title": "New Collection"}}, status=201,
     )
 
     adapter = RaindropAdapter(token="tok")
@@ -164,7 +164,7 @@ def test_create_collection() -> None:
 def test_create_collection_fails_on_missing_id() -> None:
     responses.add(
         responses.POST, f"{API_BASE}/collection",
-        json={"collection": {}}, status=201,
+        json={"result": True, "item": {}}, status=201,
     )
 
     adapter = RaindropAdapter(token="tok")

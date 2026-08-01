@@ -141,7 +141,8 @@ class RaindropAdapter:
         try:
             resp.raise_for_status()
             data = resp.json()
-            collection_id = data.get("collection", {}).get("_id")
+            # Raindrop returns the collection in 'item' (not 'collection')
+            collection_id = data.get("item", {}).get("_id")
             if collection_id is None:
                 raise RaindropError(f"No collection ID in response: {data}")
             return collection_id

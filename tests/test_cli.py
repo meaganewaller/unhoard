@@ -431,7 +431,7 @@ class TestApply:
         responses.add(
             responses.POST,
             f"{API_BASE}/collection",
-            json={"collection": {"_id": 99, "title": "NewCollection"}},
+            json={"result": True, "item": {"_id": 99, "title": "NewCollection"}},
             status=201,
         )
         responses.add(responses.PUT, f"{API_BASE}/raindrop/123", json={}, status=200)
