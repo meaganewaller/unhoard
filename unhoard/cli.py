@@ -522,11 +522,41 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="unhoard", description="Daily triage digest for your reading backlog.")
     sub = p.add_subparsers(dest="command")
 
-    init_p = sub.add_parser("init", help=f"Write a starter config to {CONFIG_PATH}")
+    init_p = sub.add_parser(
+        "init",
+        help=f"Write a starter config to {CONFIG_PATH}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+Examples:
+  unhoard init                    Write default config to {CONFIG_PATH}
+  unhoard init --force            Overwrite existing config
+
+Next steps after init:
+  1. Set RAINDROP_TOKEN (https://app.raindrop.io/settings/integrations)
+  2. Set ANTHROPIC_API_KEY (optional, for AI summaries)
+  3. unhoard sync                 Fetch items from your sources
+  4. unhoard digest               Generate today's digest
+        """.strip()
+    )
     init_p.add_argument("--force", action="store_true", help="Overwrite existing config")
     init_p.set_defaults(func=cmd_init)
 
-    sync_p = sub.add_parser("sync", help="Pull latest items from configured sources into local state")
+    sync_p = sub.add_parser(
+        "sync",
+        help="Pull latest items from configured sources into local state",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  unhoard sync                           Sync from sources in your config
+  unhoard sync --source chrome           Ad-hoc sync from Chrome only
+  unhoard sync --source chrome --source safari
+                                         Sync from multiple ad-hoc sources
+
+Related commands:
+  unhoard digest                         Generate digest after syncing
+  unhoard stats                          View item counts by source
+        """.strip()
+    )
     sync_p.add_argument(
         "--source", action="append",
         help="Ad-hoc source instead of config.toml, e.g. --source chrome --source json:/path.json "
@@ -534,11 +564,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync_p.set_defaults(func=cmd_sync)
 
-    digest_p = sub.add_parser("digest", help="Generate today's digest markdown file")
+    digest_p = sub.add_parser(
+        "digest",
+        help="Generate today's digest markdown file",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  unhoard digest                 Write digest to output directory
+  unhoard digest --print         Also display digest on stdout
+
+Digest contains:
+  - Recently added items (newest first)
+  - Stale items (haven't been touched in 30+ days)
+  - AI-generated summaries and tag suggestions
+
+Related commands:
+  unhoard analyze                Interactive review of suggestions
+  unhoard apply <key> --summary  Push digest suggestions to source
+  unhoard apply-all --all        Batch push suggestions for multiple items
+        """.strip()
+    )
     digest_p.add_argument("--print", action="store_true", help="Also print the digest to stdout")
     digest_p.set_defaults(func=cmd_digest)
 
-    mark_p = sub.add_parser("mark", help="Mark an item done, unhoarded, or snoozed by its key (or a fragment of it)")
+    mark_p = sub.add_parser(
+        "mark",
+        help="Mark an item done, unhoarded, or snoozed by its key (or fragment)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  unhoard mark raindrop:12345 --done
+                                 Mark as handled (closed out)
+  unhoard mark "react pattern" --unhoarded
+                                 Mark as synthesized and sourced elsewhere
+  unhoard mark abc123 --unhoarded --note "Used in project X"
+                                 Mark with provenance note
+  unhoard mark def456 --snooze 14
+                                 Hide for 14 days, reappear later
+
+Item key:
+  Use full key (e.g. raindrop:12345) or a unique fragment ("react", "patterns")
+  The tool will auto-complete or show options if ambiguous.
+
+Related commands:
+  unhoard synthesize <key>       Extract article text before marking
+  unhoard stats                  View current item counts
+        """.strip()
+    )
     mark_p.add_argument("key", help="Item key, e.g. raindrop:12345 (a unique fragment also works)")
     mark_p.add_argument("--done", action="store_true", help="Mark as handled (closed out, not necessarily used)")
     mark_p.add_argument(
@@ -553,7 +625,26 @@ def build_parser() -> argparse.ArgumentParser:
     mark_p.set_defaults(func=cmd_mark)
 
     apply_p = sub.add_parser(
-        "apply", help="Push AI-suggested tags/collection or the AI summary to the source, on demand"
+        "apply",
+        help="Push AI-suggested tags/collection/summary to the source, on demand",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  unhoard apply raindrop:12345 --all
+                                 Apply tags, collection, and summary
+  unhoard apply abc123 --tags    Apply only suggested tags
+  unhoard apply def456 --collection --summary
+                                 Apply collection and summary, skip tags
+
+Requires:
+  - Item must have AI suggestions (run 'unhoard digest' first)
+  - Source must support write-back (Raindrop works, others may not)
+
+Related commands:
+  unhoard digest                 Generate suggestions for items
+  unhoard analyze                Interactive review before applying
+  unhoard apply-all --all        Batch apply to multiple items
+        """.strip()
     )
     apply_p.add_argument("key", help="Item key, e.g. raindrop:12345 (a unique fragment also works)")
     apply_p.add_argument("--tags", action="store_true", help="Apply the suggested tags")
@@ -564,7 +655,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_all_p = sub.add_parser(
         "apply-all",
-        help="Batch-generate and push suggested tags/collection/summary for up to N unacted items, oldest first",
+        help="Batch-generate and push suggestions for up to N unacted items",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  unhoard apply-all --all        Apply tags, collection, summary to 10 items
+  unhoard apply-all --all --limit 25
+                                 Apply to 25 items instead of default 10
+  unhoard apply-all --tags       Apply only tags (generate if missing)
+  unhoard apply-all --summary --limit 5
+                                 Generate and apply summaries to 5 items
+
+Behavior:
+  - Processes oldest items first (by creation date)
+  - Generates AI suggestions for items that don't have them yet
+  - Skips items that have already been acted on for that dimension
+  - Continues on errors (one failure doesn't stop the batch)
+
+Related commands:
+  unhoard apply <key> --all      Apply to a single item by key
+  unhoard digest                 See what suggestions are available
+  unhoard analyze                Interactive review before batch applying
+        """.strip()
     )
     apply_all_p.add_argument(
         "--limit", type=int, default=10, metavar="N",
@@ -577,18 +689,86 @@ def build_parser() -> argparse.ArgumentParser:
     apply_all_p.set_defaults(func=cmd_apply_all)
 
     synthesize_p = sub.add_parser(
-        "synthesize", help="Pull the full article text into a standalone markdown note for your own writing"
+        "synthesize",
+        help="Extract full article text into a standalone markdown note",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  unhoard synthesize raindrop:12345
+                                 Synthesize article into markdown note
+  unhoard synthesize "react tutorial"
+                                 Find item by fragment and synthesize
+  unhoard synthesize abc123 --force
+                                 Overwrite existing note for this item
+
+Output:
+  Markdown files are written to: <output_dir>/synthesized/
+  Each file includes YAML frontmatter (title, url, tags, etc) plus:
+    - AI-generated summary (if available)
+    - Full article text
+
+Workflow:
+  1. unhoard digest               See which items have full text available
+  2. unhoard synthesize <key>     Extract article to markdown
+  3. unhoard mark <key> --unhoarded --note "location"
+                                 Mark as handled and note where you stored it
+
+Related commands:
+  unhoard digest                 Check synthesis status and summaries
+  unhoard mark <key> --unhoarded
+                                 Mark as handled after writing about it
+        """.strip()
     )
     synthesize_p.add_argument("key", help="Item key, e.g. raindrop:12345 (a unique fragment also works)")
     synthesize_p.add_argument("--force", action="store_true", help="Overwrite an existing note for this item")
     synthesize_p.set_defaults(func=cmd_synthesize)
 
-    stats_p = sub.add_parser("stats", help="Show counts by status and source")
+    stats_p = sub.add_parser(
+        "stats",
+        help="Show item counts by status, source, and processing state",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  unhoard stats                  Display all counts
+
+Tables:
+  By status                       active, done, unhoarded
+  Active items by source          where items came from (Raindrop, Chrome, etc)
+  By processing state             new, awaiting_suggestions, ready_to_review, etc
+
+Related commands:
+  unhoard digest                 See items and suggestions
+  unhoard sync                   Update stats by syncing from sources
+        """.strip()
+    )
     stats_p.set_defaults(func=cmd_stats)
 
     analyze_p = sub.add_parser(
         "analyze",
         help="Analyze untagged items and suggest collections and tags via LLM",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  unhoard analyze                Review and tag up to 1504 items interactively
+  unhoard analyze --items 50     Review and tag up to 50 items
+  unhoard analyze --auto-apply   Skip review and auto-apply all suggestions
+
+Workflow:
+  1. Fetches untagged items
+  2. Suggests collections via LLM
+  3. You review and adjust collection suggestions
+  4. Suggests tags (grouped by collection) via LLM
+  5. You review and adjust tag suggestions
+  6. Persists to local state (optionally syncs to Raindrop)
+
+Requires:
+  - ANTHROPIC_API_KEY set (for LLM suggestions)
+
+Related commands:
+  unhoard digest                 Generate and review suggestions (lighter weight)
+  unhoard apply-all --tags       Apply stored suggestions without re-analyzing
+  unhoard apply <key> --all      Apply suggestions to a single item
+        """.strip()
     )
     analyze_p.add_argument(
         "--items", type=int, default=1504, metavar="N",
