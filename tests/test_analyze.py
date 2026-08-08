@@ -581,3 +581,167 @@ class TestSuggestTags:
 
         # Should still get a suggestion for item 5
         assert any(s.item_id == 5 for s in suggestions)
+
+
+# ---------------------------------------------------------------------------
+# Compact output format (cost reduction)
+# ---------------------------------------------------------------------------
+
+def _mock_llm(mock_post: MagicMock, *response_texts: str) -> None:
+    """Queue one mocked Anthropic response per call."""
+    responses = []
+    for text in response_texts:
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"content": [{"type": "text", "text": text}]}
+        responses.append(resp)
+    mock_post.side_effect = responses
+
+
+class TestCompactCollectionFormat:
+    def _items(self) -> list[Item]:
+        return [_make_item("1", "Python async"), _make_item("2", "CSS Grid")]
+
+    def test_parses_compact_pipe_lines(self) -> None:
+        text = "1 | Development | high | none\n2 | Design | medium | Frontend\n"
+        suggestions = _parse_collection_suggestions(text, self._items())
+
+        assert len(suggestions) == 2
+        assert suggestions[0].suggested_collection == "Development"
+        assert suggestions[0].confidence == "high"
+        assert suggestions[0].conflict is None
+        assert suggestions[1].suggested_collection == "Design"
+        assert suggestions[1].confidence == "medium"
+        assert suggestions[1].conflict == "Frontend"
+
+    def test_compact_title_is_taken_from_local_items_not_the_model(self) -> None:
+        """The model is no longer asked to echo titles back -- they cost output
+        tokens and were already available locally."""
+        suggestions = _parse_collection_suggestions("1 | Development | high | none", self._items())
+        assert suggestions[0].item_title == "Python async"
+
+    def test_legacy_block_format_still_parses(self) -> None:
+        """Fallback path: the model may still emit the old verbose blocks."""
+        text = (
+            "Item ID: 1\nSuggested Collection: Development\nConfidence: high\nConflict: none\n"
+        )
+        suggestions = _parse_collection_suggestions(text, self._items())
+        assert len(suggestions) == 1
+        assert suggestions[0].suggested_collection == "Development"
+
+    def test_unknown_ids_skipped_in_compact_format(self) -> None:
+        text = "1 | Development | high | none\n999 | Ghost | high | none\n"
+        suggestions = _parse_collection_suggestions(text, self._items())
+        assert len(suggestions) == 1
+
+    def test_prompt_does_not_request_title_or_reasoning_back(self) -> None:
+        """Both were pure waste in the *response*: Reasoning is never read,
+        displayed or persisted, and Title is re-derived locally from items_by_id.
+        Together ~half the output tokens, billed at 5x input.
+
+        Titles still appear in the input listing -- that's the classification
+        signal. What must be gone is the instruction to echo them back.
+        """
+        with patch("unhoard.analyze.requests.post") as mock_post:
+            _mock_llm(mock_post, "1 | Development | high | none")
+            suggest_collections(self._items())
+            prompt = mock_post.call_args.kwargs["json"]["messages"][0]["content"]
+
+        # Reasoning is gone from the prompt entirely.
+        assert "Reasoning" not in prompt
+        # The output spec (everything after the items listing) asks for neither.
+        output_spec = prompt.split("Output exactly one line per item")[1]
+        assert "Title" not in output_spec
+        assert "title" not in output_spec
+
+
+class TestCompactTagFormat:
+    def _items(self) -> list[Item]:
+        return [_make_item("1", "Python async"), _make_item("2", "CSS Grid")]
+
+    def test_parses_compact_pipe_lines(self) -> None:
+        text = "1 | reference,tool | reviewed\n2 | learning | wip\n"
+        suggestions = _parse_tag_suggestions(text, self._items())
+
+        assert len(suggestions) == 2
+        assert suggestions[0].use_case_tags == ["reference", "tool"]
+        assert suggestions[0].status_tags == ["reviewed"]
+        assert suggestions[1].use_case_tags == ["learning"]
+        assert suggestions[1].status_tags == ["wip"]
+
+    def test_invalid_tags_filtered_in_compact_format(self) -> None:
+        text = "1 | reference,bogus | reviewed,nonsense\n"
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert suggestions[0].use_case_tags == ["reference"]
+        assert suggestions[0].status_tags == ["reviewed"]
+
+    def test_empty_tag_fields_parse_as_empty_lists(self) -> None:
+        text = "1 | none | none\n"
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert suggestions[0].use_case_tags == []
+        assert suggestions[0].status_tags == []
+
+    def test_legacy_block_format_still_parses(self) -> None:
+        text = "Item ID: 1\nUse-Case Tags: reference\nStatus Tags: reviewed\n"
+        suggestions = _parse_tag_suggestions(text, self._items())
+        assert len(suggestions) == 1
+        assert suggestions[0].use_case_tags == ["reference"]
+
+
+# ---------------------------------------------------------------------------
+# Chunking (cost reduction)
+# ---------------------------------------------------------------------------
+
+class TestChunking:
+    def _items(self, n: int) -> list[Item]:
+        return [_make_item(str(i), f"Item {i}") for i in range(1, n + 1)]
+
+    @patch("unhoard.analyze.requests.post")
+    def test_splits_into_multiple_calls(self, mock_post: MagicMock) -> None:
+        items = self._items(250)
+        chunk1 = "\n".join(f"{i} | Development | high | none" for i in range(1, 101))
+        chunk2 = "\n".join(f"{i} | Development | high | none" for i in range(101, 201))
+        chunk3 = "\n".join(f"{i} | Development | high | none" for i in range(201, 251))
+        _mock_llm(mock_post, chunk1, chunk2, chunk3)
+
+        suggestions = suggest_collections(items, limit=250, chunk_size=100)
+
+        assert mock_post.call_count == 3
+        assert len(suggestions) == 250
+
+    @patch("unhoard.analyze.requests.post")
+    def test_max_tokens_scales_with_chunk_size_not_hardcoded(self, mock_post: MagicMock) -> None:
+        """The old hardcoded max_tokens=8192 truncated the response after ~130
+        items, wasting the input spend on every item beyond that."""
+        _mock_llm(mock_post, "1 | Development | high | none")
+        suggest_collections(self._items(10), chunk_size=100)
+
+        max_tokens = mock_post.call_args.kwargs["json"]["max_tokens"]
+        assert max_tokens < 8192, "max_tokens should be sized to the chunk, not a flat 8192"
+
+    @patch("unhoard.analyze.requests.post")
+    def test_later_chunks_receive_earlier_collection_names(self, mock_post: MagicMock) -> None:
+        """Without this, each chunk invents its own taxonomy and the collections
+        fragment into near-duplicates."""
+        items = self._items(150)
+        chunk1 = "\n".join(f"{i} | Machine Learning | high | none" for i in range(1, 101))
+        chunk2 = "\n".join(f"{i} | Machine Learning | high | none" for i in range(101, 151))
+        _mock_llm(mock_post, chunk1, chunk2)
+
+        suggest_collections(items, chunk_size=100)
+
+        second_prompt = mock_post.call_args_list[1].kwargs["json"]["messages"][0]["content"]
+        assert "Machine Learning" in second_prompt
+
+    @patch("unhoard.analyze.requests.post")
+    def test_one_failing_chunk_does_not_lose_the_others(self, mock_post: MagicMock) -> None:
+        items = self._items(200)
+        good = "\n".join(f"{i} | Development | high | none" for i in range(1, 101))
+        mock_ok = MagicMock()
+        mock_ok.raise_for_status.return_value = None
+        mock_ok.json.return_value = {"content": [{"type": "text", "text": good}]}
+        mock_post.side_effect = [mock_ok, RuntimeError("boom")]
+
+        suggestions = suggest_collections(items, chunk_size=100)
+
+        assert len(suggestions) == 100

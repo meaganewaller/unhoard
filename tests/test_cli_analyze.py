@@ -229,3 +229,113 @@ class TestAnalyzeCommandEndToEnd:
         captured = capsys.readouterr()
         assert exit_code == 0
         assert "canceled" in captured.out.lower() or "no changes" in captured.out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Persist-before-review (cost reduction)
+# ---------------------------------------------------------------------------
+
+class TestPersistBeforeReview:
+    """LLM results used to be persisted only at the very end of the pipeline, so
+    cancelling either review -- or hitting EOFError on piped input -- discarded
+    everything that had just been paid for, and the next run re-sent the whole
+    corpus at full price."""
+
+    def _setup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        items: list[Item],
+        collection_review: Callable[..., Any],
+        tag_review: Callable[..., Any] | None = None,
+    ) -> list[tuple[int, int]]:
+        """Wires the pipeline and returns a log of (collections, tags) counts
+        passed to each bulk_store_suggestions call."""
+        stored: list[tuple[int, int]] = []
+
+        monkeypatch.setattr(
+            state_module.StateStore, "fetch_untagged_items", lambda self, limit: items
+        )
+        monkeypatch.setattr(
+            cli_module, "suggest_collections", lambda *a, **kw: _make_collection_suggestions(items)
+        )
+        monkeypatch.setattr(
+            cli_module, "suggest_tags", lambda *a, **kw: _make_tag_suggestions(items)
+        )
+        monkeypatch.setattr(cli_module, "review_collections_interactive", collection_review)
+        monkeypatch.setattr(
+            cli_module, "review_tags_interactive", tag_review or (lambda s, **kw: s)
+        )
+        monkeypatch.setattr(
+            state_module.StateStore,
+            "bulk_store_suggestions",
+            lambda self, items_, cols, tags: stored.append((len(cols), len(tags))),
+        )
+        monkeypatch.setattr(cli_module, "_is_interactive", lambda: False)
+        return stored
+
+    def test_collection_suggestions_stored_before_review_runs(
+        self, isolated_paths: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        items = _make_items(3)
+        seen_at_review_time: list[int] = []
+        stored: list[tuple[int, int]] = []
+
+        def _review(suggestions: Any, **kw: Any) -> Any:
+            seen_at_review_time.append(len(stored))
+            return suggestions
+
+        stored = self._setup(monkeypatch, items, _review)
+        cli_module.main(["analyze", "--items", "3"])
+
+        assert seen_at_review_time[0] >= 1, "suggestions must be persisted before review is offered"
+
+    def test_cancelling_collection_review_keeps_paid_for_suggestions(
+        self, isolated_paths: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        items = _make_items(3)
+        stored = self._setup(monkeypatch, items, lambda s, **kw: [])
+
+        exit_code = cli_module.main(["analyze", "--items", "3"])
+
+        assert exit_code == 0
+        assert stored, "cancelling review must not discard the LLM results"
+        assert stored[0][0] == 3
+
+    def test_cancelling_tag_review_keeps_collection_and_tag_suggestions(
+        self, isolated_paths: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        items = _make_items(3)
+        stored = self._setup(
+            monkeypatch, items,
+            collection_review=lambda s, **kw: s,
+            tag_review=lambda s, **kw: [],
+        )
+
+        exit_code = cli_module.main(["analyze", "--items", "3"])
+
+        assert exit_code == 0
+        assert sum(cols for cols, _ in stored) >= 3
+        assert sum(tags for _, tags in stored) >= 3, "tag results were paid for; keep them"
+
+    def test_cancel_message_tells_user_suggestions_were_saved(
+        self, isolated_paths: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        items = _make_items(3)
+        self._setup(monkeypatch, items, lambda s, **kw: [])
+
+        cli_module.main(["analyze", "--items", "3"])
+
+        out = capsys.readouterr().out
+        assert "saved" in out.lower() or "stored" in out.lower()
+
+
+def test_analyze_items_default_is_bounded() -> None:
+    """1504 was a frozen snapshot of one user's item count, which made every
+    accidental or cancelled run a full-corpus run."""
+    parser = cli_module.build_parser()
+    args = parser.parse_args(["analyze"])
+    assert args.items == 200

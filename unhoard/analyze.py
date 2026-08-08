@@ -36,91 +36,140 @@ _VALID_STATUS_TAGS = frozenset({"wip", "archived", "reviewed", "needs-refinement
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = "claude-sonnet-5"
-_SAMPLE_SIZE = 50  # items included in the prompt body (rest counted only)
+
+# Items per request. The whole corpus used to go in a single call against a flat
+# max_tokens=8192, which truncated the response after ~130 items -- every item
+# beyond that was paid for on the way in and never came back. Chunking keeps
+# each request's demanded output comfortably inside its own budget.
+_CHUNK_SIZE = 100
+
+# Output budget per item, sized for the compact one-line format below (~15
+# tokens) with headroom for long collection names. Output bills at 5x input,
+# so this is the number that actually drives cost.
+_OUTPUT_TOKENS_PER_ITEM = 24
+_MIN_OUTPUT_TOKENS = 512
+
+
+def _max_tokens_for(item_count: int) -> int:
+    """Size the output budget to the request instead of a flat 8192."""
+    return max(_MIN_OUTPUT_TOKENS, item_count * _OUTPUT_TOKENS_PER_ITEM)
+
 
 _PROMPT_TEMPLATE = """\
 You are helping to organize a personal bookmark collection. \
-Analyze the items below and suggest a collection structure.
+Analyze the items below and assign each one to a collection.
 
-Suggest 8–15 collections that would naturally group this content. \
+Use 8–15 collections overall to group this content. \
 Each collection should have a clear semantic purpose and be one level deep \
 (e.g. "Development" or "Design").
-
-Items ({count} total, showing up to {sample_size}):
+{existing_block}
+Items ({count}):
 {items_block}
 
-For each item listed above, output an assignment using this exact format \
-(one blank line between entries):
+Output exactly one line per item and nothing else -- no preamble, no blank \
+lines, no explanation:
+<item id> | <collection name> | high|medium|low | <alternative collection, or none>
+"""
 
-Item ID: <source_id>
-Title: <title>
-Suggested Collection: <collection_name>
-Confidence: high|medium|low
-Conflict: <alternative_collection_name_if_ambiguous, or "none">
-Reasoning: <one or two sentence explanation>
+_EXISTING_COLLECTIONS_BLOCK = """
+Collections already chosen for earlier items -- reuse these names exactly \
+wherever they fit, and only introduce a new collection when none of them work:
+{names}
 """
 
 
+def _existing_block(names: list[str]) -> str:
+    if not names:
+        return ""
+    return _EXISTING_COLLECTIONS_BLOCK.format(
+        names="\n".join(f"- {name}" for name in sorted(names))
+    )
+
+
+def _items_block(items: list[Item]) -> str:
+    return "\n".join(
+        f"- ID: {item.source_id} | Title: {item.title} | URL: {item.url}"
+        + (f" | Note: {item.excerpt}" if item.excerpt else "")
+        for item in items
+    )
+
+
+def _chunked(items: list[Item], size: int) -> list[list[Item]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _call_llm(prompt: str, max_tokens: int, api_key: str, model: str) -> Optional[str]:
+    """Single Messages API call. Returns None on any failure -- callers treat a
+    failed chunk as "no suggestions for these items" and keep the rest."""
+    resp = requests.post(
+        ANTHROPIC_API_URL,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=120,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
+    return "\n".join(text_blocks).strip()
+
+
 def suggest_collections(
-    items: list[Item], limit: int = 1504
+    items: list[Item], limit: int = 200, chunk_size: int = _CHUNK_SIZE
 ) -> list[CollectionSuggestion]:
     """Use the LLM to cluster items and suggest collection assignments.
+
+    Items are processed in chunks so every item that is paid for on the way in
+    actually gets an assignment back. Collection names chosen in earlier chunks
+    are fed into later ones, so the taxonomy converges instead of fragmenting
+    into per-chunk near-duplicates.
 
     Args:
         items: List of items to analyze.
         limit: Maximum number of items to process.
+        chunk_size: Items per API request.
 
     Returns:
-        List of CollectionSuggestion objects, one per recognized item. Returns
-        an empty list if ``items`` is empty, the API call fails, or the
-        response cannot be parsed.
+        List of CollectionSuggestion objects, one per recognized item. A chunk
+        whose request fails contributes nothing but does not discard the chunks
+        that succeeded.
     """
     if not items:
         return []
 
     working = items[:limit]
-
-    items_block = "\n".join(
-        f"- ID: {item.source_id} | Title: {item.title} | URL: {item.url}"
-        + (f" | Note: {item.excerpt}" if item.excerpt else "")
-        for item in working
-    )
-
-    prompt = _PROMPT_TEMPLATE.format(
-        count=len(working),
-        sample_size=len(working),
-        items_block=items_block,
-    )
-
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     model = os.environ.get("UNHOARD_MODEL", DEFAULT_MODEL)
 
-    try:
-        resp = requests.post(
-            ANTHROPIC_API_URL,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": 8192,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=120,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        text_blocks = [
-            b["text"] for b in data.get("content", []) if b.get("type") == "text"
-        ]
-        response_text = "\n".join(text_blocks).strip()
-    except Exception as exc:  # noqa: BLE001 — never fatal
-        print(f"[analyze] LLM call failed: {exc}", file=sys.stderr)
-        return []
+    suggestions: list[CollectionSuggestion] = []
+    seen_collections: list[str] = []
 
-    return _parse_collection_suggestions(response_text, working)
+    for chunk in _chunked(working, chunk_size):
+        prompt = _PROMPT_TEMPLATE.format(
+            count=len(chunk),
+            items_block=_items_block(chunk),
+            existing_block=_existing_block(seen_collections),
+        )
+        try:
+            response_text = _call_llm(prompt, _max_tokens_for(len(chunk)), api_key, model)
+        except Exception as exc:  # noqa: BLE001 — one bad chunk shouldn't lose the rest
+            print(f"[analyze] LLM call failed: {exc}", file=sys.stderr)
+            continue
+
+        chunk_suggestions = _parse_collection_suggestions(response_text or "", chunk)
+        suggestions.extend(chunk_suggestions)
+        for s in chunk_suggestions:
+            if s.suggested_collection not in seen_collections:
+                seen_collections.append(s.suggested_collection)
+
+    return suggestions
 
 
 def _parse_collection_suggestions(
@@ -146,6 +195,32 @@ def _parse_collection_suggestions(
     items_by_id: dict[str, Item] = {item.source_id: item for item in items}
 
     suggestions: list[CollectionSuggestion] = []
+
+    def _compact(line: str) -> bool:
+        """Parse `<id> | <collection> | <confidence> | <conflict>`.
+
+        Returns True if the line was consumed. A line only counts as compact
+        when its first field is an id we actually sent, which keeps prose and
+        legacy `Key: value` lines from being misread as data.
+        """
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2 or parts[0] not in items_by_id:
+            return False
+        item = items_by_id[parts[0]]
+        confidence = parts[2].lower() if len(parts) > 2 else "medium"
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "medium"
+        conflict = parts[3] if len(parts) > 3 else ""
+        suggestions.append(
+            CollectionSuggestion(
+                item_id=_stable_id(parts[0]),
+                item_title=item.title,
+                suggested_collection=parts[1] or "Uncategorized",
+                confidence=confidence,
+                conflict=None if not conflict or conflict.lower() == "none" else conflict,
+            )
+        )
+        return True
 
     # State for the current block being parsed
     current_source_id: Optional[str] = None
@@ -182,7 +257,11 @@ def _parse_collection_suggestions(
 
     for raw_line in response_text.splitlines():
         line = raw_line.strip()
-        if not line or ":" not in line:
+        if not line:
+            continue
+        if _compact(line):
+            continue
+        if ":" not in line:
             continue
 
         prefix, _, rest = line.partition(":")
@@ -230,18 +309,14 @@ Status tags (apply any that fit): wip, archived, reviewed, needs-refinement
 Items:
 {items_block}
 
-For each item listed above, output an assignment using this exact format \
-(one blank line between entries):
-
-Item ID: <source_id>
-Use-Case Tags: <comma-separated list from allowed use-case tags>
-Status Tags: <comma-separated list from allowed status tags>
-Reasoning: <one sentence explanation>
+Output exactly one line per item and nothing else -- no preamble, no blank \
+lines, no explanation:
+<item id> | <comma-separated use-case tags, or none> | <comma-separated status tags, or none>
 """
 
 
 def suggest_tags(
-    items: list[Item], collections: dict[int, str]
+    items: list[Item], collections: dict[int, str], chunk_size: int = _CHUNK_SIZE
 ) -> list[TagSuggestion]:
     """Use the LLM to suggest use-case and status tags for items.
 
@@ -274,47 +349,26 @@ def suggest_tags(
     all_suggestions: list[TagSuggestion] = []
 
     for collection_name, group_items in groups.items():
-        # Cap the items sent per-group to avoid exceeding the context window.
-        # The full group is still tagged — items beyond _SAMPLE_SIZE reuse the
-        # same collection context so the LLM guidance stays coherent.
-        prompt_items = group_items[:_SAMPLE_SIZE]
-        items_block = "\n".join(
-            f"- ID: {item.source_id} | Title: {item.title} | URL: {item.url}"
-            + (f" | Note: {item.excerpt}" if item.excerpt else "")
-            for item in prompt_items
-        )
-
-        prompt = _TAG_PROMPT_TEMPLATE.format(
-            collection=collection_name,
-            items_block=items_block,
-        )
-
-        try:
-            resp = requests.post(
-                ANTHROPIC_API_URL,
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": 8192,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                timeout=120,
+        # Chunk rather than truncate. This previously sent only the first 50
+        # items of a group while claiming the whole group was still tagged --
+        # everything past that was never in the prompt, so it never came back.
+        for chunk in _chunked(group_items, chunk_size):
+            prompt = _TAG_PROMPT_TEMPLATE.format(
+                collection=collection_name,
+                items_block=_items_block(chunk),
             )
-            resp.raise_for_status()
-            data = resp.json()
-            text_blocks = [
-                b["text"] for b in data.get("content", []) if b.get("type") == "text"
-            ]
-            response_text = "\n".join(text_blocks).strip()
-        except Exception as exc:  # noqa: BLE001 — never fatal
-            print(f"[analyze] LLM tag call failed ({collection_name}): {exc}", file=sys.stderr)
-            continue
+            try:
+                response_text = _call_llm(
+                    prompt, _max_tokens_for(len(chunk)), api_key, model
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad chunk shouldn't lose the rest
+                print(
+                    f"[analyze] LLM tag call failed ({collection_name}): {exc}",
+                    file=sys.stderr,
+                )
+                continue
 
-        all_suggestions.extend(_parse_tag_suggestions(response_text, group_items))
+            all_suggestions.extend(_parse_tag_suggestions(response_text or "", chunk))
 
     return all_suggestions
 
@@ -339,6 +393,29 @@ def _parse_tag_suggestions(
     items_by_id: dict[str, Item] = {item.source_id: item for item in items}
 
     suggestions: list[TagSuggestion] = []
+
+    def _compact(line: str) -> bool:
+        """Parse `<id> | <use-case tags> | <status tags>`. See the collection
+        parser's twin for why the id must match something we sent."""
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2 or parts[0] not in items_by_id:
+            return False
+        item = items_by_id[parts[0]]
+
+        def _tags(raw: str, allowed: frozenset[str]) -> list[str]:
+            if not raw or raw.lower() == "none":
+                return []
+            return [t.strip() for t in raw.split(",") if t.strip() in allowed]
+
+        suggestions.append(
+            TagSuggestion(
+                item_id=_stable_id(parts[0]),
+                item_title=item.title,
+                use_case_tags=_tags(parts[1], _VALID_USE_CASE_TAGS),
+                status_tags=_tags(parts[2] if len(parts) > 2 else "", _VALID_STATUS_TAGS),
+            )
+        )
+        return True
 
     current_source_id: Optional[str] = None
     current_use_case_tags: list[str] = []
@@ -365,7 +442,11 @@ def _parse_tag_suggestions(
 
     for raw_line in response_text.splitlines():
         line = raw_line.strip()
-        if not line or ":" not in line:
+        if not line:
+            continue
+        if _compact(line):
+            continue
+        if ":" not in line:
             continue
 
         prefix, _, rest = line.partition(":")

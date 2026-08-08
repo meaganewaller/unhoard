@@ -465,13 +465,24 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         return 1
     console.print(f"  Got [bold]{len(collection_suggestions)}[/bold] collection suggestion(s).")
 
+    # Persist immediately, before offering review. These cost real money to
+    # generate, and review is where a run is most likely to end early -- a
+    # cancel, a Ctrl-C, or piped stdin hitting EOFError. Storing first means
+    # ending the run early costs nothing to redo: the suggestions are on disk,
+    # `apply-all` can push them, and the next `analyze` skips these items
+    # instead of re-sending the whole corpus at full price.
+    store.bulk_store_suggestions(items, collection_suggestions, [])
+
     # Step 3: User review of collections (skip when --auto-apply).
     if args.auto_apply:
         reviewed_collections = collection_suggestions
     else:
         reviewed_collections = review_collections_interactive(collection_suggestions)
         if not reviewed_collections:
-            console.print("[dim]Review canceled — no changes saved.[/dim]")
+            console.print(
+                "[dim]Review canceled — the collection suggestions were already "
+                "saved, so re-running won't re-query the model.[/dim]"
+            )
             return 0
 
     # Step 4: Build the collection map (item_id -> collection name) for tag grouping.
@@ -486,6 +497,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print_warning("LLM returned no tag suggestions.")
     else:
         console.print(f"  Got [bold]{len(tag_suggestions)}[/bold] tag suggestion(s).")
+        # Same reasoning as the collection suggestions above -- bank the paid-for
+        # result before the second place the run can end early. Also re-stores the
+        # reviewed collections so any edits from step 3 land even if tag review
+        # is cancelled.
+        store.bulk_store_suggestions(items, reviewed_collections, tag_suggestions)
 
     # Step 6: User review of tags (skip when --auto-apply).
     if args.auto_apply:
@@ -495,7 +511,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             tag_suggestions, by_collection=True, collections=collections_map
         )
         if not reviewed_tags:
-            console.print("[dim]Tag review cancelled — no changes saved.[/dim]")
+            console.print(
+                "[dim]Tag review cancelled — the suggestions were already saved, "
+                "so re-running won't re-query the model.[/dim]"
+            )
             return 0
 
     # Step 7: Persist to DB.
@@ -749,17 +768,24 @@ Related commands:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  unhoard analyze                Review and tag up to 1504 items interactively
+  unhoard analyze                Review and tag up to 200 items interactively
   unhoard analyze --items 50     Review and tag up to 50 items
+  unhoard analyze --items 1000   Work through a larger slice of the backlog
   unhoard analyze --auto-apply   Skip review and auto-apply all suggestions
 
 Workflow:
   1. Fetches untagged items
-  2. Suggests collections via LLM
-  3. You review and adjust collection suggestions
+  2. Suggests collections via LLM (in chunks, so every item gets an answer)
+  3. Saves those suggestions, then you review and adjust them
   4. Suggests tags (grouped by collection) via LLM
-  5. You review and adjust tag suggestions
-  6. Persists to local state (optionally syncs to Raindrop)
+  5. Saves those too, then you review and adjust them
+  6. Persists the reviewed result (optionally syncs to Raindrop)
+
+Cost:
+  Each run queries the model once per chunk of items, so --items is the main
+  cost lever. Suggestions are saved as soon as they arrive, so cancelling a
+  review never throws away work you've already paid for, and already-analyzed
+  items are skipped on the next run.
 
 Requires:
   - ANTHROPIC_API_KEY set (for LLM suggestions)
@@ -771,8 +797,8 @@ Related commands:
         """.strip()
     )
     analyze_p.add_argument(
-        "--items", type=int, default=1504, metavar="N",
-        help="Max items to analyze (default: 1504)",
+        "--items", type=int, default=200, metavar="N",
+        help="Max items to analyze (default: 200)",
     )
     analyze_p.add_argument(
         "--auto-apply", action="store_true",

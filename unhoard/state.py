@@ -275,7 +275,7 @@ class StateStore:
             "SELECT * FROM items WHERE key LIKE ?", (f"{key_prefix}%",)
         ).fetchall()
 
-    def fetch_untagged_items(self, limit: int = 1504) -> list[Item]:
+    def fetch_untagged_items(self, limit: int = 200) -> list[Item]:
         """Fetch active items without assigned collections.
 
         Returns the oldest items first (by created_at) so batch runs make
