@@ -4,6 +4,8 @@ All tests mock the Anthropic HTTP endpoint so no real API calls are made.
 """
 from __future__ import annotations
 
+import json
+from typing import Any, Callable
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -787,3 +789,196 @@ class TestConfigPlumbing:
         suggest_collections(self._items(), api_key="k", model="claude-haiku-4-5")
 
         assert mock_post.call_args.kwargs["json"]["model"] == "claude-haiku-4-5"
+
+
+# ---------------------------------------------------------------------------
+# Batch API
+# ---------------------------------------------------------------------------
+
+def _batch_responses(submit_id: str, results_jsonl: str, polls: int = 1) -> Callable[..., Any]:
+    """Fake the submit -> poll -> fetch-results sequence."""
+    state = {"polls": 0}
+
+    def _handler(url: str, **kwargs: Any) -> Any:
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if url.endswith("/results"):
+            resp.text = results_jsonl
+        elif url.endswith(submit_id):
+            state["polls"] += 1
+            status = "ended" if state["polls"] >= polls else "in_progress"
+            resp.json.return_value = {"id": submit_id, "processing_status": status}
+        else:
+            resp.json.return_value = {"id": submit_id, "processing_status": "in_progress"}
+        return resp
+
+    return _handler
+
+
+class TestBatchMode:
+    def _items(self, n: int) -> list[Item]:
+        return [_make_item(str(i), f"Item {i}") for i in range(1, n + 1)]
+
+    def _results_jsonl(self, chunks: dict[str, str]) -> str:
+        return "\n".join(
+            json.dumps({
+                "custom_id": cid,
+                "result": {"type": "succeeded",
+                           "message": {"content": [{"type": "text", "text": text}]}},
+            })
+            for cid, text in chunks.items()
+        )
+
+    @patch("unhoard.analyze.requests.get")
+    @patch("unhoard.analyze.requests.post")
+    def test_submits_one_request_per_chunk_with_distinct_custom_ids(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        items = self._items(250)
+        # Taxonomy pass is synchronous and goes through post() first.
+        tax = MagicMock()
+        tax.raise_for_status.return_value = None
+        tax.json.return_value = {"content": [{"type": "text", "text": "Development\nDesign"}]}
+        submit = MagicMock()
+        submit.raise_for_status.return_value = None
+        submit.json.return_value = {"id": "batch_1", "processing_status": "in_progress"}
+        mock_post.side_effect = [tax, submit]
+
+        results = self._results_jsonl({
+            f"chunk-{i}": "\n".join(
+                f"{n} | Development | high | none"
+                for n in range(i * 100 + 1, min((i + 1) * 100, 250) + 1)
+            )
+            for i in range(3)
+        })
+        mock_get.side_effect = _batch_responses("batch_1", results)
+
+        suggestions = suggest_collections(
+            items, limit=250, chunk_size=100, api_key="k", batch=True, poll_interval=0
+        )
+
+        submitted = mock_post.call_args_list[1].kwargs["json"]["requests"]
+        assert len(submitted) == 3
+        assert len({r["custom_id"] for r in submitted}) == 3
+        assert len(suggestions) == 250
+
+    @patch("unhoard.analyze.requests.get")
+    @patch("unhoard.analyze.requests.post")
+    def test_results_matched_by_custom_id_not_position(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """The Batches API returns results in any order."""
+        items = self._items(200)
+        tax = MagicMock()
+        tax.raise_for_status.return_value = None
+        tax.json.return_value = {"content": [{"type": "text", "text": "Development"}]}
+        submit = MagicMock()
+        submit.raise_for_status.return_value = None
+        submit.json.return_value = {"id": "batch_1", "processing_status": "in_progress"}
+        mock_post.side_effect = [tax, submit]
+
+        # chunk-1 (items 101-200) deliberately emitted before chunk-0.
+        results = "\n".join([
+            json.dumps({"custom_id": "chunk-1", "result": {"type": "succeeded", "message": {
+                "content": [{"type": "text", "text": "\n".join(
+                    f"{n} | Design | high | none" for n in range(101, 201))}]}}}),
+            json.dumps({"custom_id": "chunk-0", "result": {"type": "succeeded", "message": {
+                "content": [{"type": "text", "text": "\n".join(
+                    f"{n} | Development | high | none" for n in range(1, 101))}]}}}),
+        ])
+        mock_get.side_effect = _batch_responses("batch_1", results)
+
+        suggestions = suggest_collections(
+            items, limit=200, chunk_size=100, api_key="k", batch=True, poll_interval=0
+        )
+
+        by_id = {s.item_id: s.suggested_collection for s in suggestions}
+        assert by_id[1] == "Development", "chunk-0's result was applied to the wrong items"
+        assert by_id[150] == "Design"
+
+    @patch("unhoard.analyze.requests.get")
+    @patch("unhoard.analyze.requests.post")
+    def test_errored_result_does_not_lose_successful_ones(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        items = self._items(200)
+        tax = MagicMock()
+        tax.raise_for_status.return_value = None
+        tax.json.return_value = {"content": [{"type": "text", "text": "Development"}]}
+        submit = MagicMock()
+        submit.raise_for_status.return_value = None
+        submit.json.return_value = {"id": "batch_1", "processing_status": "in_progress"}
+        mock_post.side_effect = [tax, submit]
+
+        results = "\n".join([
+            json.dumps({"custom_id": "chunk-0", "result": {"type": "succeeded", "message": {
+                "content": [{"type": "text", "text": "\n".join(
+                    f"{n} | Development | high | none" for n in range(1, 101))}]}}}),
+            json.dumps({"custom_id": "chunk-1", "result": {
+                "type": "errored", "error": {"type": "invalid_request"}}}),
+        ])
+        mock_get.side_effect = _batch_responses("batch_1", results)
+
+        suggestions = suggest_collections(
+            items, limit=200, chunk_size=100, api_key="k", batch=True, poll_interval=0
+        )
+        assert len(suggestions) == 100
+
+    @patch("unhoard.analyze.requests.get")
+    @patch("unhoard.analyze.requests.post")
+    def test_polls_until_ended(self, mock_post: MagicMock, mock_get: MagicMock) -> None:
+        items = self._items(10)
+        tax = MagicMock()
+        tax.raise_for_status.return_value = None
+        tax.json.return_value = {"content": [{"type": "text", "text": "Development"}]}
+        submit = MagicMock()
+        submit.raise_for_status.return_value = None
+        submit.json.return_value = {"id": "batch_1", "processing_status": "in_progress"}
+        mock_post.side_effect = [tax, submit]
+
+        results = self._results_jsonl(
+            {"chunk-0": "\n".join(f"{n} | Development | high | none" for n in range(1, 11))}
+        )
+        mock_get.side_effect = _batch_responses("batch_1", results, polls=3)
+
+        suggestions = suggest_collections(
+            items, chunk_size=100, api_key="k", batch=True, poll_interval=0
+        )
+        assert len(suggestions) == 10
+        # 3 status polls + 1 results fetch
+        assert mock_get.call_count == 4
+
+    @patch("unhoard.analyze.requests.post")
+    def test_sync_path_is_default_and_makes_no_batch_calls(self, mock_post: MagicMock) -> None:
+        _mock_llm(mock_post, "1 | Development | high | none")
+        suggest_collections(self._items(1), api_key="k")
+
+        assert all("batches" not in c.args[0] for c in mock_post.call_args_list)
+
+    @patch("unhoard.analyze.requests.get")
+    @patch("unhoard.analyze.requests.post")
+    def test_tags_batch_keys_results_by_custom_id(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Tagging needs no taxonomy pass -- the vocabulary is fixed in the
+        prompt -- so groups go straight out as one batch."""
+        items = self._items(3)
+        submit = MagicMock()
+        submit.raise_for_status.return_value = None
+        submit.json.return_value = {"id": "batch_1", "processing_status": "in_progress"}
+        mock_post.return_value = submit
+
+        results = self._results_jsonl({
+            "group-0-chunk-0": "1 | reference | reviewed\n2 | tool | wip\n3 | learning | archived"
+        })
+        mock_get.side_effect = _batch_responses("batch_1", results)
+
+        suggestions = suggest_tags(items, {}, api_key="k", batch=True, poll_interval=0)
+
+        assert len(suggestions) == 3
+        by_id = {s.item_id: s.use_case_tags for s in suggestions}
+        assert by_id[1] == ["reference"]
+        assert by_id[3] == ["learning"]
+        # No taxonomy pass: the only post() is the batch submit.
+        assert mock_post.call_count == 1
+        assert "batches" in mock_post.call_args.args[0]

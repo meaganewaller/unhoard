@@ -427,3 +427,36 @@ class TestPerTaskModelRouting:
 
         assert seen["collections"] == "claude-sonnet-5"
         assert seen["tags"] == "claude-haiku-4-5"
+
+
+def test_batch_flag_defaults_off_and_reaches_both_llm_calls(
+    isolated_paths: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parser = cli_module.build_parser()
+    assert parser.parse_args(["analyze"]).batch is False
+    assert parser.parse_args(["analyze", "--batch"]).batch is True
+
+    items = _make_items(1)
+    seen: dict[str, bool] = {}
+    monkeypatch.setattr(
+        state_module.StateStore, "fetch_untagged_items", lambda self, limit: items
+    )
+    monkeypatch.setattr(
+        state_module.StateStore, "bulk_store_suggestions", lambda self, *a, **kw: None
+    )
+    monkeypatch.setattr(cli_module, "review_collections_interactive", lambda s, **kw: s)
+    monkeypatch.setattr(cli_module, "review_tags_interactive", lambda s, **kw: s)
+    monkeypatch.setattr(cli_module, "_is_interactive", lambda: False)
+    monkeypatch.setattr(
+        cli_module, "suggest_collections",
+        lambda items_, **kw: (seen.__setitem__("collections", kw["batch"]),
+                              _make_collection_suggestions(items_))[1],
+    )
+    monkeypatch.setattr(
+        cli_module, "suggest_tags",
+        lambda items_, c, **kw: (seen.__setitem__("tags", kw["batch"]),
+                                 _make_tag_suggestions(items_))[1],
+    )
+
+    cli_module.main(["analyze", "--items", "1", "--batch"])
+    assert seen == {"collections": True, "tags": True}

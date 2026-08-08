@@ -13,8 +13,10 @@ _parse_tag_suggestions(text, items) -> list[TagSuggestion]  (semi-public for tes
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+import time
 from collections import defaultdict
 from typing import Optional
 
@@ -35,7 +37,22 @@ _VALID_USE_CASE_TAGS = frozenset(
 _VALID_STATUS_TAGS = frozenset({"wip", "archived", "reviewed", "needs-refinement"})
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+BATCH_API_URL = "https://api.anthropic.com/v1/messages/batches"
 DEFAULT_MODEL = "claude-sonnet-5"
+
+# Batches bill every token at 50%. analyze is a good fit -- it is not
+# latency-sensitive, and chunking already produced the natural unit of work.
+# Most batches finish well inside an hour; the API's own ceiling is 24h.
+_BATCH_POLL_INTERVAL = 30.0
+_BATCH_TIMEOUT = 24 * 60 * 60.0
+
+# Items sampled to derive the collection taxonomy before a batch run. The
+# synchronous path threads each chunk's collection names into the next prompt
+# so the taxonomy converges; a batch submits every chunk at once, so there is
+# no such feedback and the collections would fragment into near-duplicates.
+# One small up-front call fixes the taxonomy that all chunks then classify
+# against, which is both cheaper and more consistent than the sync carry-over.
+_TAXONOMY_SAMPLE_SIZE = 150
 
 # Items per request. The whole corpus used to go in a single call against a flat
 # max_tokens=8192, which truncated the response after ~130 items -- every item
@@ -98,6 +115,140 @@ def _chunked(items: list[Item], size: int) -> list[list[Item]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+_TAXONOMY_PROMPT_TEMPLATE = """\
+You are helping to organize a personal bookmark collection. \
+Below is a sample of {count} items from it.
+
+Propose 8–15 collections that would naturally group this content. \
+Each collection should have a clear semantic purpose and be one level deep \
+(e.g. "Development" or "Design"). They must cover the whole library, not just \
+the sample.
+
+Sample items:
+{items_block}
+
+Output one collection name per line and nothing else -- no numbering, no \
+preamble, no explanation.
+"""
+
+
+def derive_taxonomy(
+    items: list[Item],
+    sample_size: int = _TAXONOMY_SAMPLE_SIZE,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+) -> list[str]:
+    """Ask for the collection names once, from a sample, before classifying.
+
+    Returns [] if the call fails, which callers treat as "no taxonomy to seed
+    with" rather than an error -- classification still works, it just has less
+    to anchor on.
+    """
+    if not items:
+        return []
+    api_key, model = _resolve_credentials(api_key, model)
+    sample = items[:sample_size]
+    prompt = _TAXONOMY_PROMPT_TEMPLATE.format(
+        count=len(sample), items_block=_items_block(sample)
+    )
+    try:
+        text = _call_llm(prompt, 1024, api_key, model)
+    except Exception as exc:  # noqa: BLE001 — seeding is best-effort
+        print(f"[analyze] taxonomy call failed: {exc}", file=sys.stderr)
+        return []
+
+    names: list[str] = []
+    for line in (text or "").splitlines():
+        name = line.strip().lstrip("-*0123456789. ").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _run_batch(
+    prompts: dict[str, tuple[str, int]],
+    api_key: str,
+    model: str,
+    poll_interval: float,
+    timeout: float,
+) -> dict[str, str]:
+    """Submit one batch, wait for it, and return custom_id -> response text.
+
+    Results come back in arbitrary order, so everything is keyed by custom_id
+    rather than position. A request that errored, expired, or was canceled is
+    simply absent from the result, which callers treat the same as a failed
+    chunk on the synchronous path.
+    """
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    submit = requests.post(
+        BATCH_API_URL,
+        headers=headers,
+        json={
+            "requests": [
+                {
+                    "custom_id": custom_id,
+                    "params": {
+                        "model": model,
+                        "max_tokens": max_tokens,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                }
+                for custom_id, (prompt, max_tokens) in prompts.items()
+            ]
+        },
+        timeout=120,
+    )
+    submit.raise_for_status()
+    batch_id = submit.json()["id"]
+    print(
+        f"[analyze] submitted batch {batch_id} ({len(prompts)} requests) "
+        f"at 50% of standard token rates; waiting for it to finish",
+        file=sys.stderr,
+    )
+
+    deadline = time.monotonic() + timeout
+    while True:
+        status_resp = requests.get(f"{BATCH_API_URL}/{batch_id}", headers=headers, timeout=60)
+        status_resp.raise_for_status()
+        if status_resp.json().get("processing_status") == "ended":
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"batch {batch_id} did not finish within {timeout:.0f}s; "
+                f"it may still complete -- results stay available for 29 days"
+            )
+        time.sleep(poll_interval)
+
+    results_resp = requests.get(f"{BATCH_API_URL}/{batch_id}/results", headers=headers, timeout=300)
+    results_resp.raise_for_status()
+
+    out: dict[str, str] = {}
+    for line in results_resp.text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        result = record.get("result", {})
+        if result.get("type") != "succeeded":
+            print(
+                f"[analyze] batch request {record.get('custom_id')} "
+                f"{result.get('type', 'failed')}",
+                file=sys.stderr,
+            )
+            continue
+        blocks = result.get("message", {}).get("content", [])
+        out[record["custom_id"]] = "\n".join(
+            b["text"] for b in blocks if b.get("type") == "text"
+        ).strip()
+    return out
+
+
 def _resolve_credentials(
     api_key: Optional[str], model: Optional[str]
 ) -> tuple[str, str]:
@@ -142,6 +293,9 @@ def suggest_collections(
     chunk_size: int = _CHUNK_SIZE,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    batch: bool = False,
+    poll_interval: float = _BATCH_POLL_INTERVAL,
+    timeout: float = _BATCH_TIMEOUT,
 ) -> list[CollectionSuggestion]:
     """Use the LLM to cluster items and suggest collection assignments.
 
@@ -158,6 +312,11 @@ def suggest_collections(
             ``Config.anthropic_api_key``; the environment is only a fallback.
         model: Model id. Callers should pass a resolved ``Config`` value --
             reading the environment here made ``model`` in config.toml a no-op.
+        batch: Submit the chunks through the Message Batches API, which bills
+            every token at 50%. Trades latency for cost: the call blocks until
+            the batch finishes, which is usually minutes but can be hours.
+        poll_interval: Seconds between batch status checks.
+        timeout: Seconds to wait for a batch before giving up.
 
     Returns:
         List of CollectionSuggestion objects, one per recognized item. A chunk
@@ -169,6 +328,11 @@ def suggest_collections(
 
     working = items[:limit]
     api_key, model = _resolve_credentials(api_key, model)
+
+    if batch:
+        return _suggest_collections_batched(
+            working, chunk_size, api_key, model, poll_interval, timeout
+        )
 
     suggestions: list[CollectionSuggestion] = []
     seen_collections: list[str] = []
@@ -191,6 +355,53 @@ def suggest_collections(
             if s.suggested_collection not in seen_collections:
                 seen_collections.append(s.suggested_collection)
 
+    return suggestions
+
+
+def _suggest_collections_batched(
+    working: list[Item],
+    chunk_size: int,
+    api_key: str,
+    model: str,
+    poll_interval: float,
+    timeout: float,
+) -> list[CollectionSuggestion]:
+    """Derive the taxonomy once, then classify every chunk against it in one batch.
+
+    The synchronous path converges the taxonomy by feeding each chunk's
+    collection names into the next prompt. A batch has no such feedback -- every
+    chunk is submitted at once -- so the taxonomy is fixed up front instead.
+    """
+    taxonomy = derive_taxonomy(working, api_key=api_key, model=model)
+
+    chunks = _chunked(working, chunk_size)
+    prompts = {
+        f"chunk-{i}": (
+            _PROMPT_TEMPLATE.format(
+                count=len(chunk),
+                items_block=_items_block(chunk),
+                existing_block=_existing_block(taxonomy),
+            ),
+            _max_tokens_for(len(chunk)),
+        )
+        for i, chunk in enumerate(chunks)
+    }
+
+    try:
+        results = _run_batch(prompts, api_key, model, poll_interval, timeout)
+    except Exception as exc:  # noqa: BLE001 — never fatal
+        print(f"[analyze] batch failed: {exc}", file=sys.stderr)
+        return []
+
+    # Key by custom_id, never by position: the Batches API returns results in
+    # arbitrary order, so zipping them against the chunk list would silently
+    # assign one chunk's collections to another chunk's items.
+    suggestions: list[CollectionSuggestion] = []
+    for i, chunk in enumerate(chunks):
+        text = results.get(f"chunk-{i}")
+        if text is None:
+            continue
+        suggestions.extend(_parse_collection_suggestions(text, chunk))
     return suggestions
 
 
@@ -343,6 +554,9 @@ def suggest_tags(
     chunk_size: int = _CHUNK_SIZE,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    batch: bool = False,
+    poll_interval: float = _BATCH_POLL_INTERVAL,
+    timeout: float = _BATCH_TIMEOUT,
 ) -> list[TagSuggestion]:
     """Use the LLM to suggest use-case and status tags for items.
 
@@ -353,6 +567,10 @@ def suggest_tags(
         items: List of items to tag.
         collections: Mapping of item_id -> suggested_collection_name.  Items
             absent from this dict are placed in an "Uncategorized" batch.
+        batch: Submit all groups through the Message Batches API at 50% of
+            standard token rates, trading latency for cost.
+        poll_interval: Seconds between batch status checks.
+        timeout: Seconds to wait for a batch before giving up.
 
     Returns:
         List of TagSuggestion objects, one per recognized item.  Returns an
@@ -370,6 +588,11 @@ def suggest_tags(
         groups[collection_name].append(item)
 
     api_key, model = _resolve_credentials(api_key, model)
+
+    if batch:
+        return _suggest_tags_batched(
+            groups, chunk_size, api_key, model, poll_interval, timeout
+        )
 
     all_suggestions: list[TagSuggestion] = []
 
@@ -396,6 +619,49 @@ def suggest_tags(
             all_suggestions.extend(_parse_tag_suggestions(response_text or "", chunk))
 
     return all_suggestions
+
+
+def _suggest_tags_batched(
+    groups: dict[str, list[Item]],
+    chunk_size: int,
+    api_key: str,
+    model: str,
+    poll_interval: float,
+    timeout: float,
+) -> list[TagSuggestion]:
+    """Every collection group's chunks go out as one batch.
+
+    Unlike collection assignment, tagging needs no taxonomy pass: the tag
+    vocabulary is fixed in the prompt, so the groups are already independent.
+    """
+    prompts: dict[str, tuple[str, int]] = {}
+    chunk_items: dict[str, list[Item]] = {}
+    for g, (collection_name, group_items) in enumerate(groups.items()):
+        for c, chunk in enumerate(_chunked(group_items, chunk_size)):
+            custom_id = f"group-{g}-chunk-{c}"
+            prompts[custom_id] = (
+                _TAG_PROMPT_TEMPLATE.format(
+                    collection=collection_name, items_block=_items_block(chunk)
+                ),
+                _max_tokens_for(len(chunk)),
+            )
+            chunk_items[custom_id] = chunk
+
+    if not prompts:
+        return []
+
+    try:
+        results = _run_batch(prompts, api_key, model, poll_interval, timeout)
+    except Exception as exc:  # noqa: BLE001 — never fatal
+        print(f"[analyze] batch tag call failed: {exc}", file=sys.stderr)
+        return []
+
+    suggestions: list[TagSuggestion] = []
+    for custom_id, chunk in chunk_items.items():
+        text = results.get(custom_id)
+        if text is not None:
+            suggestions.extend(_parse_tag_suggestions(text, chunk))
+    return suggestions
 
 
 def _parse_tag_suggestions(

@@ -459,8 +459,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     # Step 2: LLM collection clustering.
     console.print("Suggesting collections via LLM...")
+    if args.batch:
+        console.print(
+            "[dim]  Batch mode: 50% of standard token rates, but the run blocks "
+            "until the batch finishes (usually minutes, occasionally hours).[/dim]"
+        )
     collection_suggestions = suggest_collections(
-        items, limit=args.items, api_key=cfg.anthropic_api_key, model=cfg.model
+        items, limit=args.items, api_key=cfg.anthropic_api_key, model=cfg.model,
+        batch=args.batch,
     )
     if not collection_suggestions:
         print_warning("LLM returned no collection suggestions — check ANTHROPIC_API_KEY.")
@@ -497,7 +503,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     # fast_model, not model: assigning from a fixed 10-word vocabulary is
     # classification, not the judgment call that picking the taxonomy was.
     tag_suggestions = suggest_tags(
-        items, collections_map, api_key=cfg.anthropic_api_key, model=cfg.fast_model
+        items, collections_map, api_key=cfg.anthropic_api_key, model=cfg.fast_model,
+        batch=args.batch,
     )
     if not tag_suggestions:
         print_warning("LLM returned no tag suggestions.")
@@ -778,6 +785,8 @@ Examples:
   unhoard analyze --items 50     Review and tag up to 50 items
   unhoard analyze --items 1000   Work through a larger slice of the backlog
   unhoard analyze --auto-apply   Skip review and auto-apply all suggestions
+  unhoard analyze --items 1414 --batch --auto-apply
+                                 Whole backlog at half price, unattended
 
 Workflow:
   1. Fetches untagged items
@@ -789,9 +798,11 @@ Workflow:
 
 Cost:
   Each run queries the model once per chunk of items, so --items is the main
-  cost lever. Suggestions are saved as soon as they arrive, so cancelling a
-  review never throws away work you've already paid for, and already-analyzed
-  items are skipped on the next run.
+  cost lever. --batch halves the token rate when you can wait. Suggestions are
+  saved as soon as they arrive, so cancelling a review never throws away work
+  you've already paid for, and already-analyzed items are skipped next run.
+  Tagging uses the cheaper `fast_model`; only the collection taxonomy uses
+  `model`. Both are set in ~/.config/unhoard/config.toml.
 
 Requires:
   - ANTHROPIC_API_KEY set (for LLM suggestions)
@@ -809,6 +820,12 @@ Related commands:
     analyze_p.add_argument(
         "--auto-apply", action="store_true",
         help="Skip interactive review and auto-apply all suggestions",
+    )
+    analyze_p.add_argument(
+        "--batch", action="store_true",
+        help="Use the Message Batches API: 50%% of standard token rates, but "
+             "the run blocks until the batch finishes (usually minutes, "
+             "occasionally hours). Best paired with --auto-apply.",
     )
     analyze_p.set_defaults(func=cmd_analyze)
 
