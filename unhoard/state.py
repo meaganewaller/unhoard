@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
-from .schema import Item
+from .schema import Item, stable_item_id
 from .types import CollectionSuggestion, TagSuggestion
 
 SCHEMA = """
@@ -324,13 +324,13 @@ class StateStore:
         """
         # Build a lookup of item by resolved integer id -> source_id so we can
         # join suggestions (which carry item_id as int) back to DB rows.
-        id_to_source_id: dict[int, str] = {}
-        for item in items:
-            try:
-                resolved = int(item.source_id)
-            except ValueError:
-                resolved = abs(hash(item.source_id)) % (10**9)
-            id_to_source_id[resolved] = item.source_id
+        # Must use analyze._stable_id, the same resolution that produced those
+        # item_ids: Python's built-in hash() is PYTHONHASHSEED-seeded, so a
+        # non-numeric source_id would resolve differently here than it did in
+        # analyze and the suggestion would be silently dropped.
+        id_to_source_id: dict[int, str] = {
+            stable_item_id(item.source_id): item.source_id for item in items
+        }
 
         # Build per-source_id maps for fast lookup.
         collection_by_sid: dict[str, str] = {}

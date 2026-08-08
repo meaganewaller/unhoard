@@ -233,3 +233,51 @@ def test_migrate_adds_columns_to_a_pre_existing_older_schema(tmp_path: Path) -> 
 
     cols = {row["name"] for row in store.conn.execute("PRAGMA table_info(items)")}
     assert {"context_hash", "note", "suggested_tags", "synthesized_at"} <= cols
+
+
+# ---------------------------------------------------------------------------
+# bulk_store_suggestions
+# ---------------------------------------------------------------------------
+
+def test_bulk_store_suggestions_stores_numeric_source_id(
+    state_store: StateStore, make_item: Callable[..., Item]
+) -> None:
+    from unhoard.types import CollectionSuggestion, TagSuggestion
+
+    item = make_item(source="raindrop", source_id="42", title="Numeric")
+    state_store.upsert_items([item])
+
+    state_store.bulk_store_suggestions(
+        [item],
+        [CollectionSuggestion(item_id=42, item_title="Numeric", suggested_collection="Dev", confidence="high")],
+        [TagSuggestion(item_id=42, item_title="Numeric", use_case_tags=["tool"], status_tags=[])],
+    )
+
+    row = state_store.active_items()[0]
+    assert row["suggested_collection"] == "Dev"
+    assert json.loads(row["suggested_tags"]) == ["tool"]
+
+
+def test_bulk_store_suggestions_stores_non_numeric_source_id(
+    state_store: StateStore, make_item: Callable[..., Item]
+) -> None:
+    """Chrome/Safari/JSON bookmarks have non-numeric source_ids. Persistence must
+    resolve them with the same stable MD5 hash analyze.py uses -- Python's hash()
+    is PYTHONHASHSEED-seeded, so a suggestion generated in one process would fail
+    to match its DB row in another and be silently dropped."""
+    from unhoard.analyze import _stable_id
+    from unhoard.types import CollectionSuggestion, TagSuggestion
+
+    item = make_item(source="chrome", source_id="bookmark-abc-123", title="Non-numeric")
+    state_store.upsert_items([item])
+    resolved = _stable_id("bookmark-abc-123")
+
+    state_store.bulk_store_suggestions(
+        [item],
+        [CollectionSuggestion(item_id=resolved, item_title="Non-numeric", suggested_collection="Reference", confidence="high")],
+        [TagSuggestion(item_id=resolved, item_title="Non-numeric", use_case_tags=["reference"], status_tags=[])],
+    )
+
+    row = state_store.active_items()[0]
+    assert row["suggested_collection"] == "Reference"
+    assert json.loads(row["suggested_tags"]) == ["reference"]

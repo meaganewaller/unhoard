@@ -1,9 +1,29 @@
 """Canonical item schema. Every adapter yields these, regardless of source."""
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+def stable_item_id(source_id: str) -> int:
+    """Convert a source_id to a stable integer id.
+
+    Uses int() for numeric ids and a stable MD5-based hash for non-numeric ones.
+    Python's built-in hash() is deliberately NOT used: its seed changes across
+    processes (PYTHONHASHSEED), so non-numeric ids would resolve to different
+    integers in different runs and fail to match DB rows.
+
+    Lives here rather than in analyze.py because both the code that *produces*
+    suggestion item_ids and the code that *persists* them must agree on it --
+    when they disagreed, suggestions for non-numeric ids were silently dropped.
+    """
+    try:
+        return int(source_id)
+    except ValueError:
+        digest = hashlib.md5(source_id.encode(), usedforsecurity=False).hexdigest()[:8]
+        return int(digest, 16)
 
 
 @dataclass

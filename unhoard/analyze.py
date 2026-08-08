@@ -13,7 +13,6 @@ _parse_tag_suggestions(text, items) -> list[TagSuggestion]  (semi-public for tes
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import sys
 from collections import defaultdict
@@ -21,22 +20,13 @@ from typing import Optional
 
 import requests
 
-from unhoard.schema import Item
+from unhoard.schema import Item, stable_item_id
 from unhoard.types import CollectionSuggestion, TagSuggestion
 
-def _stable_id(source_id: str) -> int:
-    """Convert a source_id to a stable integer item_id.
-
-    Uses int() for numeric IDs and a stable MD5-based hash for non-numeric
-    ones.  Python's built-in hash() is deliberately NOT used here: its seed
-    changes across processes (PYTHONHASHSEED), so non-numeric IDs would resolve
-    to different integers in different runs and fail to match DB rows.
-    """
-    try:
-        return int(source_id)
-    except ValueError:
-        digest = hashlib.md5(source_id.encode(), usedforsecurity=False).hexdigest()[:8]
-        return int(digest, 16)
+# Canonical definition lives in schema.py so state.py can share it -- the two
+# must agree or suggestions for non-numeric source_ids get dropped on persist.
+# Re-exported under the original private name for existing callers and tests.
+_stable_id = stable_item_id
 
 
 _VALID_USE_CASE_TAGS = frozenset(
