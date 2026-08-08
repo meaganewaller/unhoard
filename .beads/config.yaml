@@ -66,5 +66,10 @@
 # - github.token    → use GITHUB_TOKEN env var instead
 
 export.auto: true
+# Stage .beads/issues.jsonl automatically after an export. Without this the
+# export is written but left unstaged, so a `bd close` late in a session can
+# miss the commit that was meant to carry it and only surface on the next
+# `bd dolt push`.
+export.git-add: true
 sync:
     remote: "git+ssh://git@github.com/meaganewaller/unhoard"
