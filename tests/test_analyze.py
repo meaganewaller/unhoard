@@ -745,3 +745,45 @@ class TestChunking:
         suggestions = suggest_collections(items, chunk_size=100)
 
         assert len(suggestions) == 100
+
+
+# ---------------------------------------------------------------------------
+# Config plumbing
+# ---------------------------------------------------------------------------
+
+class TestConfigPlumbing:
+    """analyze read ANTHROPIC_API_KEY and UNHOARD_MODEL straight from os.environ,
+    so `model` in config.toml silently had no effect on the one path that
+    dominates spend. Credentials and model now arrive as explicit arguments,
+    matching summarize()."""
+
+    def _items(self) -> list[Item]:
+        return [_make_item("1", "Python async")]
+
+    @patch("unhoard.analyze.requests.post")
+    def test_collections_use_explicit_model_and_key(self, mock_post: MagicMock) -> None:
+        _mock_llm(mock_post, "1 | Development | high | none")
+        suggest_collections(self._items(), api_key="sk-explicit", model="claude-haiku-4-5")
+
+        assert mock_post.call_args.kwargs["json"]["model"] == "claude-haiku-4-5"
+        assert mock_post.call_args.kwargs["headers"]["x-api-key"] == "sk-explicit"
+
+    @patch("unhoard.analyze.requests.post")
+    def test_tags_use_explicit_model_and_key(self, mock_post: MagicMock) -> None:
+        _mock_llm(mock_post, "1 | reference | reviewed")
+        suggest_tags(self._items(), {}, api_key="sk-explicit", model="claude-haiku-4-5")
+
+        assert mock_post.call_args.kwargs["json"]["model"] == "claude-haiku-4-5"
+        assert mock_post.call_args.kwargs["headers"]["x-api-key"] == "sk-explicit"
+
+    @patch("unhoard.analyze.requests.post")
+    def test_explicit_model_wins_over_environment(
+        self, mock_post: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The whole bug: an env var must not override a resolved config value.
+        Precedence between env and config file is load_config()'s job."""
+        monkeypatch.setenv("UNHOARD_MODEL", "claude-sonnet-5")
+        _mock_llm(mock_post, "1 | Development | high | none")
+        suggest_collections(self._items(), api_key="k", model="claude-haiku-4-5")
+
+        assert mock_post.call_args.kwargs["json"]["model"] == "claude-haiku-4-5"

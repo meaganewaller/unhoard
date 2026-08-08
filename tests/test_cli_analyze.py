@@ -339,3 +339,54 @@ def test_analyze_items_default_is_bounded() -> None:
     parser = cli_module.build_parser()
     args = parser.parse_args(["analyze"])
     assert args.items == 200
+
+
+class TestConfigReachesTheModel:
+    """End-to-end proof that `model` in config.toml changes which model analyze
+    calls -- it used to be read from os.environ inside analyze and ignored."""
+
+    def _run_with_config(
+        self, isolated_paths: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, toml: str
+    ) -> list[Any]:
+        isolated_paths.config_dir.mkdir(parents=True, exist_ok=True)
+        isolated_paths.config_path.write_text(toml)
+
+        items = _make_items(1)
+        monkeypatch.setattr(
+            state_module.StateStore, "fetch_untagged_items", lambda self, limit: items
+        )
+        monkeypatch.setattr(
+            state_module.StateStore, "bulk_store_suggestions", lambda self, *a, **kw: None
+        )
+        monkeypatch.setattr(cli_module, "review_collections_interactive", lambda s, **kw: s)
+        monkeypatch.setattr(cli_module, "review_tags_interactive", lambda s, **kw: s)
+        monkeypatch.setattr(cli_module, "_is_interactive", lambda: False)
+
+        calls: list[Any] = []
+
+        class _Resp:
+            @staticmethod
+            def raise_for_status() -> None: ...
+            @staticmethod
+            def json() -> dict:
+                return {"content": [{"type": "text", "text": "1 | Development | high | none"}]}
+
+        def _post(*args: Any, **kwargs: Any) -> Any:
+            calls.append(kwargs)
+            return _Resp()
+
+        monkeypatch.setattr("unhoard.analyze.requests.post", _post)
+        cli_module.main(["analyze", "--items", "1"])
+        return calls
+
+    def test_model_from_config_file_is_used(
+        self, isolated_paths: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = self._run_with_config(
+            isolated_paths, monkeypatch,
+            'anthropic_api_key = "sk-from-config"\nmodel = "claude-haiku-4-5"\n',
+        )
+
+        assert calls, "no API call was made"
+        assert all(c["json"]["model"] == "claude-haiku-4-5" for c in calls)
+        assert all(c["headers"]["x-api-key"] == "sk-from-config" for c in calls)

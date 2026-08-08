@@ -459,7 +459,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     # Step 2: LLM collection clustering.
     console.print("Suggesting collections via LLM...")
-    collection_suggestions = suggest_collections(items, limit=args.items)
+    collection_suggestions = suggest_collections(
+        items, limit=args.items, api_key=cfg.anthropic_api_key, model=cfg.model
+    )
     if not collection_suggestions:
         print_warning("LLM returned no collection suggestions — check ANTHROPIC_API_KEY.")
         return 1
@@ -492,7 +494,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     # Step 5: LLM tag suggestion.
     console.print("Suggesting tags via LLM...")
-    tag_suggestions = suggest_tags(items, collections_map)
+    tag_suggestions = suggest_tags(
+        items, collections_map, api_key=cfg.anthropic_api_key, model=cfg.model
+    )
     if not tag_suggestions:
         print_warning("LLM returned no tag suggestions.")
     else:

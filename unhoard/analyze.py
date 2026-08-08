@@ -98,6 +98,21 @@ def _chunked(items: list[Item], size: int) -> list[list[Item]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+def _resolve_credentials(
+    api_key: Optional[str], model: Optional[str]
+) -> tuple[str, str]:
+    """Prefer explicitly-passed values, falling back to the environment.
+
+    Callers should pass resolved ``Config`` values. The environment fallback
+    exists only so direct library use still works without a Config; it must
+    never override an argument, which is what made ``model`` in config.toml
+    silently ineffective on the most expensive code path.
+    """
+    resolved_key = api_key if api_key is not None else os.environ.get("ANTHROPIC_API_KEY", "")
+    resolved_model = model or os.environ.get("UNHOARD_MODEL") or DEFAULT_MODEL
+    return resolved_key, resolved_model
+
+
 def _call_llm(prompt: str, max_tokens: int, api_key: str, model: str) -> Optional[str]:
     """Single Messages API call. Returns None on any failure -- callers treat a
     failed chunk as "no suggestions for these items" and keep the rest."""
@@ -122,7 +137,11 @@ def _call_llm(prompt: str, max_tokens: int, api_key: str, model: str) -> Optiona
 
 
 def suggest_collections(
-    items: list[Item], limit: int = 200, chunk_size: int = _CHUNK_SIZE
+    items: list[Item],
+    limit: int = 200,
+    chunk_size: int = _CHUNK_SIZE,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> list[CollectionSuggestion]:
     """Use the LLM to cluster items and suggest collection assignments.
 
@@ -135,6 +154,10 @@ def suggest_collections(
         items: List of items to analyze.
         limit: Maximum number of items to process.
         chunk_size: Items per API request.
+        api_key: Anthropic API key. Callers should pass the resolved
+            ``Config.anthropic_api_key``; the environment is only a fallback.
+        model: Model id. Callers should pass a resolved ``Config`` value --
+            reading the environment here made ``model`` in config.toml a no-op.
 
     Returns:
         List of CollectionSuggestion objects, one per recognized item. A chunk
@@ -145,8 +168,7 @@ def suggest_collections(
         return []
 
     working = items[:limit]
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    model = os.environ.get("UNHOARD_MODEL", DEFAULT_MODEL)
+    api_key, model = _resolve_credentials(api_key, model)
 
     suggestions: list[CollectionSuggestion] = []
     seen_collections: list[str] = []
@@ -316,7 +338,11 @@ lines, no explanation:
 
 
 def suggest_tags(
-    items: list[Item], collections: dict[int, str], chunk_size: int = _CHUNK_SIZE
+    items: list[Item],
+    collections: dict[int, str],
+    chunk_size: int = _CHUNK_SIZE,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> list[TagSuggestion]:
     """Use the LLM to suggest use-case and status tags for items.
 
@@ -343,8 +369,7 @@ def suggest_tags(
         collection_name = collections.get(item_id, "Uncategorized")
         groups[collection_name].append(item)
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    model = os.environ.get("UNHOARD_MODEL", DEFAULT_MODEL)
+    api_key, model = _resolve_credentials(api_key, model)
 
     all_suggestions: list[TagSuggestion] = []
 
