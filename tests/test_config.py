@@ -117,3 +117,26 @@ def test_write_default_config_overwrites_with_force(isolated_paths: SimpleNamesp
     write_default_config(force=True)
 
     assert "unhoard config" in isolated_paths.config_path.read_text()
+
+
+def test_fast_model_defaults_to_haiku(isolated_paths: SimpleNamespace) -> None:
+    """Tagging and summarization are classification against a fixed vocabulary,
+    not reasoning -- Haiku 4.5 is $1/$5 against Sonnet 5's $3/$15."""
+    cfg = load_config()
+    assert cfg.model == "claude-sonnet-5"
+    assert cfg.fast_model == "claude-haiku-4-5"
+
+
+def test_fast_model_from_config_file(isolated_paths: SimpleNamespace) -> None:
+    isolated_paths.config_dir.mkdir(parents=True, exist_ok=True)
+    isolated_paths.config_path.write_text('fast_model = "claude-sonnet-5"\n')
+    assert load_config().fast_model == "claude-sonnet-5"
+
+
+def test_fast_model_env_overrides_config_file(
+    isolated_paths: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolated_paths.config_dir.mkdir(parents=True, exist_ok=True)
+    isolated_paths.config_path.write_text('fast_model = "claude-sonnet-5"\n')
+    monkeypatch.setenv("UNHOARD_FAST_MODEL", "claude-haiku-4-5")
+    assert load_config().fast_model == "claude-haiku-4-5"

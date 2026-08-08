@@ -453,3 +453,27 @@ class TestBuildDigest:
         markdown, _ = build_digest(cfg, state_store)
 
         assert "suggested --" not in markdown
+
+
+def test_summaries_use_fast_model(
+    cfg: Config, state_store: StateStore, make_item: Callable[..., Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-item summarization is the other classification-shaped path, so it
+    routes to fast_model rather than the taxonomy model."""
+    from unhoard import digest as digest_module
+
+    cfg.anthropic_api_key = "sk-test"
+    item = make_item(source_id="1", title="Old", created_at=datetime.now(timezone.utc) - timedelta(days=90))
+    state_store.upsert_items([item])
+    row = state_store.active_items()[0]
+
+    seen: dict[str, str] = {}
+
+    def _fake_summarize(title, url, api_key, model, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seen["model"] = model
+        return {}, ""
+
+    monkeypatch.setattr(digest_module, "ai_summarize", _fake_summarize)
+    digest_module.ensure_ai_suggestions(cfg, state_store, row, [])
+
+    assert seen["model"] == cfg.fast_model == "claude-haiku-4-5"

@@ -216,8 +216,13 @@ def ensure_ai_suggestions(
         return summary_text, suggested_tags, suggested_collection
 
     current_ctx_hash = compute_context_hash(cfg.context)
+    # fast_model: a two-sentence summary plus an action label is closer to
+    # classification than to reasoning. Note this only affects summaries
+    # generated from here on -- needs_fresh_summary() keys off the context
+    # hash, not the model, so switching models does not invalidate and re-bill
+    # every summary already cached.
     parsed, chash = ai_summarize(
-        row["title"], row["url"], cfg.anthropic_api_key, cfg.model,
+        row["title"], row["url"], cfg.anthropic_api_key, cfg.fast_model,
         cfg.context, collection_names, cfg.max_tokens_summary,
     )
     if parsed.get("raw"):

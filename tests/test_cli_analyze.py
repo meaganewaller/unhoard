@@ -390,3 +390,40 @@ class TestConfigReachesTheModel:
         assert calls, "no API call was made"
         assert all(c["json"]["model"] == "claude-haiku-4-5" for c in calls)
         assert all(c["headers"]["x-api-key"] == "sk-from-config" for c in calls)
+
+
+class TestPerTaskModelRouting:
+    """Taxonomy is a judgment call and stays on `model`; tag assignment picks
+    from a fixed 10-word vocabulary and goes to the cheaper `fast_model`."""
+
+    def test_taxonomy_uses_model_and_tagging_uses_fast_model(
+        self, isolated_paths: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        items = _make_items(1)
+        seen: dict[str, str] = {}
+
+        monkeypatch.setattr(
+            state_module.StateStore, "fetch_untagged_items", lambda self, limit: items
+        )
+        monkeypatch.setattr(
+            state_module.StateStore, "bulk_store_suggestions", lambda self, *a, **kw: None
+        )
+        monkeypatch.setattr(cli_module, "review_collections_interactive", lambda s, **kw: s)
+        monkeypatch.setattr(cli_module, "review_tags_interactive", lambda s, **kw: s)
+        monkeypatch.setattr(cli_module, "_is_interactive", lambda: False)
+
+        def _collections(items_: Any, **kw: Any) -> Any:
+            seen["collections"] = kw["model"]
+            return _make_collection_suggestions(items_)
+
+        def _tags(items_: Any, collections_: Any, **kw: Any) -> Any:
+            seen["tags"] = kw["model"]
+            return _make_tag_suggestions(items_)
+
+        monkeypatch.setattr(cli_module, "suggest_collections", _collections)
+        monkeypatch.setattr(cli_module, "suggest_tags", _tags)
+
+        cli_module.main(["analyze", "--items", "1"])
+
+        assert seen["collections"] == "claude-sonnet-5"
+        assert seen["tags"] == "claude-haiku-4-5"

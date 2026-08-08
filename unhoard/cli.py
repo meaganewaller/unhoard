@@ -494,8 +494,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     # Step 5: LLM tag suggestion.
     console.print("Suggesting tags via LLM...")
+    # fast_model, not model: assigning from a fixed 10-word vocabulary is
+    # classification, not the judgment call that picking the taxonomy was.
     tag_suggestions = suggest_tags(
-        items, collections_map, api_key=cfg.anthropic_api_key, model=cfg.model
+        items, collections_map, api_key=cfg.anthropic_api_key, model=cfg.fast_model
     )
     if not tag_suggestions:
         print_warning("LLM returned no tag suggestions.")
